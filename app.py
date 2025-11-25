@@ -12,7 +12,7 @@ import traceback
 from collections import Counter
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (R_100 | DIGIT DIFFER | x14.0 | 1 Tick)
+# BOT CONSTANT SETTINGS (R_100 | DIGIT DIFFER | x14.0 | 2 Ticks, uses first)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"        
@@ -20,9 +20,9 @@ DURATION = 1            # مدة الصفقة 1 تيك
 DURATION_UNIT = "t"     
 
 # إعدادات المضاعفة والتحليل
-TICK_SAMPLE_SIZE = 1            # 1 تيك
+TICK_SAMPLE_SIZE = 2            # 2 تيك
 MAX_CONSECUTIVE_LOSSES = 2    
-MARTINGALE_MULTIPLIER = 14.0  # 💡 تم التعديل إلى 14.0
+MARTINGALE_MULTIPLIER = 14.0  # x14.0
 
 # إعدادات العقد
 CONTRACT_TYPE = "DIGITDIFF" 
@@ -134,15 +134,12 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 # TRADING BOT FUNCTIONS (دوال منطق التداول)
 # ==========================================================
 
-def calculate_barrier_less_one(last_digit):
+def calculate_target_barrier(last_digit):
     """
-    المنطق الجديد: يختار حاجزاً أقل بـ1 من الرقم النهائي للتيك الأخير.
-    إذا كان الرقم النهائي هو 0، يتم اختيار 9.
+    💡 المنطق الجديد: الحاجز هو نفس الرقم النهائي للتيك الذي تم تحليله.
+    (إلغاء Barrier-1)
     """
-    if last_digit == 0:
-        return 9
-    else:
-        return last_digit - 1
+    return last_digit
 
 
 def calculate_martingale_stake(base_stake, current_step, multiplier):
@@ -339,11 +336,11 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 
             # --- منطق التداول العادي (لا يوجد عقود مفتوحة) ---
 
-            # 2. جلب 1 تيك تاريخي
+            # 2. جلب 2 تيك تاريخي
             history_request = {
                 "ticks_history": SYMBOL,
                 "end": "latest",
-                "count": TICK_SAMPLE_SIZE, # القيمة 1
+                "count": TICK_SAMPLE_SIZE, # القيمة 2
                 "style": "ticks"
             }
             history_response = sync_send_and_recv(ws, history_request, "history", timeout=10)
@@ -362,6 +359,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                  print(f"❌ [DATA ERROR] Received only {len(prices)} ticks, expected {TICK_SAMPLE_SIZE}. Skipping entry.")
                  continue
             
+            # يتم ترتيب التيكات من الأقدم للأحدث (الأول هو الأقدم/ما قبل الأخير)
             last_digits = [int(str(float(p))[-1]) for p in prices if p is not None]
             
             # تحديث الحالة للتحليل/العرض
@@ -369,14 +367,16 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             current_data['last_valid_tick_price'] = float(prices[-1]) if prices else 0.0
             save_session_data(email, current_data)
 
-            # 3. التحليل واتخاذ القرار (المنطق الجديد: X-1)
+            # 3. التحليل واتخاذ القرار (المنطق الجديد: استخدام التيك الأول X)
             if len(last_digits) == TICK_SAMPLE_SIZE:
                 
-                last_digit = last_digits[0]
-                # استخدام المنطق الجديد
-                target_prediction = calculate_barrier_less_one(last_digit)
+                # 💡 نستخدم الرقم النهائي للتيك الأول (الأقدم/ما قبل الأخير)
+                first_tick_digit = last_digits[0] 
                 
-                print(f"🧠 [ANALYSIS] Last Digit: {last_digit}. Calculated Barrier (X-1): {target_prediction}.")
+                # استخدام المنطق الجديد (الحاجز = نفس الرقم)
+                target_prediction = calculate_target_barrier(first_tick_digit)
+                
+                print(f"🧠 [ANALYSIS] Ticks: {last_digits}. First Digit: {first_tick_digit}. Calculated Barrier (X): {target_prediction}.")
 
                 if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES:
                     stop_bot(email, clear_data=True, stop_reason="SL Reached: Max Consecutive Losses reached.")
@@ -395,7 +395,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     }
                 }
                 
-                print(f"🧠 [SINGLE ENTRY] Digit: {target_prediction} | Stake: {round(stake, 2):.2f}. Sending BUY request...")
+                print(f"🧠 [SINGLE ENTRY] Barrier: {target_prediction} | Stake: {round(stake, 2):.2f}. Sending BUY request...")
                 buy_response = sync_send_and_recv(ws, trade_request, "buy", timeout=15)
                 
                 if 'error' in buy_response:
@@ -547,7 +547,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = 'Digit Differ (R_100 - Strategy: Previous Tick Digit X-1 / Conditional Martingale on Loss - x' + martingale_multiplier|string + ' Martingale, Max ' + max_consecutive_losses|string + ' Losses, ' + duration|string + ' Tick)' %}
+    {% set strategy = 'Digit Differ (R_100 - Strategy: First of 2 Ticks Digit X / Conditional Martingale on Loss - x' + martingale_multiplier|string + ' Martingale, Max ' + max_consecutive_losses|string + ' Losses, ' + duration|string + ' Tick)' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing every 1 second)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -555,7 +555,7 @@ CONTROL_FORM = """
     <p>Current Stake: {{ session_data.currency }} {{ session_data.current_stake|round(2) }}</p>
     <p>Consecutive Losses: {{ session_data.consecutive_losses }} / {{ max_consecutive_losses }}</p>
     <p style="font-weight: bold; color: green;">Total Wins: {{ session_data.total_wins }} | Total Losses: {{ session_data.total_losses }}</p>
-    <p style="font-weight: bold; color: purple;">Last Digits Sampled: {{ session_data.last_digits_history|length }} / {{ tick_sample_size }}</p>
+    <p style="font-weight: bold; color: purple;">Last Digits Sampled: {{ session_data.last_digits_history|length }} / {{ tick_sample_size }} (Uses First)</p>
     <p style="font-weight: bold; color: #007bff;">Current Strategy: {{ strategy }}</p>
     <p style="font-weight: bold; color: #ff5733;">Contracts Open: {{ session_data.open_contract_ids|length }}</p>
     
@@ -592,7 +592,7 @@ CONTROL_FORM = """
         var isRunning = {{ 'true' if session_data and session_data.is_running else 'false' }};
         
         if (isRunning) {
-            // 💡 تم التعديل إلى 1000 ميلي ثانية (1 ثانية)
+            // تحديث كل 1 ثانية
             setTimeout(function() {
                 window.location.reload();
             }, 1000); 
@@ -691,7 +691,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully (Synchronous Polling). Strategy: Previous Tick Digit X-1 (1 Tick Analysis) with x{MARTINGALE_MULTIPLIER} Conditional Martingale (Max {MAX_CONSECUTIVE_LOSSES} Losses, 1 Tick)', 'success')
+    flash(f'Bot started successfully (Synchronous Polling). Strategy: First of 2 Ticks Digit X (2 Ticks Analysis) with x{MARTINGALE_MULTIPLIER} Conditional Martingale (Max {MAX_CONSECUTIVE_LOSSES} Losses, 1 Tick)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
