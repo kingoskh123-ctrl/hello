@@ -12,7 +12,7 @@ import traceback
 from collections import Counter
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (R_100 | DIGIT DIFFER | x19.0 | 6 Ticks)
+# BOT CONSTANT SETTINGS (R_100 | DIGIT DIFFER | x14.0 | 1 Tick)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"        
@@ -20,9 +20,9 @@ DURATION = 1            # مدة الصفقة 1 تيك
 DURATION_UNIT = "t"     
 
 # إعدادات المضاعفة والتحليل
-TICK_SAMPLE_SIZE = 6            
+TICK_SAMPLE_SIZE = 1            # 1 تيك
 MAX_CONSECUTIVE_LOSSES = 2    
-MARTINGALE_MULTIPLIER = 14.0  
+MARTINGALE_MULTIPLIER = 14.0  # 💡 تم التعديل إلى 14.0
 
 # إعدادات العقد
 CONTRACT_TYPE = "DIGITDIFF" 
@@ -134,64 +134,19 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 # TRADING BOT FUNCTIONS (دوال منطق التداول)
 # ==========================================================
 
-def find_most_frequent_digit(digits_list):
-    """ (دالة احتياطية) تحسب الرقم الأكثر تكراراً في قائمة الأرقام النهائية """
-    if not digits_list:
-        return 0 
-        
-    counts = Counter(digits_list)
-    all_digits_counts = {i: counts.get(i, 0) for i in range(10)}
-    
-    max_count = max(all_digits_counts.values())
-    
-    for digit in range(10):
-        if all_digits_counts[digit] == max_count:
-            return digit
-
-    return 0 
-
-def find_least_frequent_digit(digits_list):
+def calculate_barrier_less_one(last_digit):
     """
-    وظيفة جديدة: يختار أصغر رقم (0-9) غير موجود في القائمة.
-    إذا كانت جميع الأرقام قد ظهرت، يختار أصغر رقم ظهر أقل عدد من المرات.
+    المنطق الجديد: يختار حاجزاً أقل بـ1 من الرقم النهائي للتيك الأخير.
+    إذا كان الرقم النهائي هو 0، يتم اختيار 9.
     """
-    if not digits_list:
-        return 0 
-        
-    all_digits = set(range(10))
-    current_digits = set(digits_list)
-    
-    # 1. البحث عن الأرقام المفقودة (التي لم تظهر على الإطلاق)
-    missing_digits = all_digits - current_digits
-    
-    if missing_digits:
-        # اختيار أصغر رقم مفقود
-        target = min(missing_digits)
-        print(f"🎯 [ANALYSIS] Missing digits found: {sorted(list(missing_digits))}. Choosing the smallest: {target}")
-        return target
-        
-    # 2. في حالة ظهور جميع الأرقام (أو لم يكن هناك رقم مفقود)
+    if last_digit == 0:
+        return 9
     else:
-        # حساب تكرار كل رقم
-        counts = Counter(digits_list)
-        all_digits_counts = {i: counts.get(i, 0) for i in range(10)}
-        
-        # إيجاد أقل عدد من التكرارات
-        min_count = min(all_digits_counts.values())
-        
-        # اختيار أصغر رقم يملك هذا التكرار الأدنى
-        for digit in range(10):
-            if all_digits_counts[digit] == min_count:
-                target = digit
-                print(f"🎯 [ANALYSIS] No missing digits (High Volatility). Choosing the least frequent (count {min_count}): {target}")
-                return target
-
-    # كإجراء احترازي
-    return 0 
+        return last_digit - 1
 
 
 def calculate_martingale_stake(base_stake, current_step, multiplier):
-    """ منطق المضاعفة: ضرب الرهان الأساسي في معامل المضاعفة (x19) لعدد الخطوات """
+    """ منطق المضاعفة: ضرب الرهان الأساسي في معامل المضاعفة (x14) لعدد الخطوات """
     if current_step == 0: 
         return base_stake
     return base_stake * (multiplier ** current_step)
@@ -337,7 +292,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             else:
                 wait_time = 0.5 
             
-            # print(f"⏳ [TIMER] Waiting {wait_time:.1f} seconds for the next entry window (00 or 30).")
             time.sleep(wait_time if wait_time > 0.5 else 0.5)
             continue 
 
@@ -385,11 +339,11 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 
             # --- منطق التداول العادي (لا يوجد عقود مفتوحة) ---
 
-            # 2. جلب 6 تيكات تاريخية (تم حذف "subscribe": 0)
+            # 2. جلب 1 تيك تاريخي
             history_request = {
                 "ticks_history": SYMBOL,
                 "end": "latest",
-                "count": TICK_SAMPLE_SIZE, 
+                "count": TICK_SAMPLE_SIZE, # القيمة 1
                 "style": "ticks"
             }
             history_response = sync_send_and_recv(ws, history_request, "history", timeout=10)
@@ -415,12 +369,15 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             current_data['last_valid_tick_price'] = float(prices[-1]) if prices else 0.0
             save_session_data(email, current_data)
 
-            # 3. التحليل واتخاذ القرار باستخدام المنطق الجديد: أصغر رقم مفقود
+            # 3. التحليل واتخاذ القرار (المنطق الجديد: X-1)
             if len(last_digits) == TICK_SAMPLE_SIZE:
                 
-                # *** استخدام الدالة الجديدة ***
-                target_prediction = find_least_frequent_digit(last_digits)
+                last_digit = last_digits[0]
+                # استخدام المنطق الجديد
+                target_prediction = calculate_barrier_less_one(last_digit)
                 
+                print(f"🧠 [ANALYSIS] Last Digit: {last_digit}. Calculated Barrier (X-1): {target_prediction}.")
+
                 if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES:
                     stop_bot(email, clear_data=True, stop_reason="SL Reached: Max Consecutive Losses reached.")
                     continue
@@ -590,9 +547,9 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = 'Digit Differ (R_100 - Strategy: Least Frequent/Missing Digit in Last ' + tick_sample_size|string + ' Ticks / Conditional Martingale on Loss - x' + martingale_multiplier|string + ' Martingale, Max ' + max_consecutive_losses|string + ' Losses, ' + duration|string + ' Tick)' %}
+    {% set strategy = 'Digit Differ (R_100 - Strategy: Previous Tick Digit X-1 / Conditional Martingale on Loss - x' + martingale_multiplier|string + ' Martingale, Max ' + max_consecutive_losses|string + ' Losses, ' + duration|string + ' Tick)' %}
     
-    <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
+    <p class="status-running">✅ Bot is Running! (Auto-refreshing every 1 second)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
     <p>Net Profit: {{ session_data.currency }} {{ session_data.current_profit|round(2) }}</p>
     <p>Current Stake: {{ session_data.currency }} {{ session_data.current_stake|round(2) }}</p>
@@ -635,9 +592,10 @@ CONTROL_FORM = """
         var isRunning = {{ 'true' if session_data and session_data.is_running else 'false' }};
         
         if (isRunning) {
+            // 💡 تم التعديل إلى 1000 ميلي ثانية (1 ثانية)
             setTimeout(function() {
                 window.location.reload();
-            }, 5000); 
+            }, 1000); 
         }
     }
 
@@ -733,7 +691,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully (Synchronous Polling). Strategy: Least Frequent/Missing Digit (6 Ticks Analysis) with x{MARTINGALE_MULTIPLIER} Conditional Martingale (Max {MAX_CONSECUTIVE_LOSSES} Losses, 1 Tick)', 'success')
+    flash(f'Bot started successfully (Synchronous Polling). Strategy: Previous Tick Digit X-1 (1 Tick Analysis) with x{MARTINGALE_MULTIPLIER} Conditional Martingale (Max {MAX_CONSECUTIVE_LOSSES} Losses, 1 Tick)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
