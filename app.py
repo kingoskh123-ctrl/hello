@@ -16,7 +16,7 @@ from collections import Counter
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"       
-DURATION = 1           # مدة الصفقة 1 تيك
+DURATION = 5           # مدة الصفقة 1 تيك
 DURATION_UNIT = "t"    
 
 # إعدادات المضاعفة والتحليل
