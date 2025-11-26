@@ -12,7 +12,7 @@ import traceback
 from collections import Counter
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (R_100 | DIGIT DIFFER | x14.0 | 3 Ticks, checks recurrence)
+# BOT CONSTANT SETTINGS (R_100 | DIGIT DIFFER | x14.0 | 2 Ticks, checks last digit recurrence)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"       
@@ -20,7 +20,7 @@ DURATION = 1           # مدة الصفقة 1 تيك
 DURATION_UNIT = "t"    
 
 # إعدادات المضاعفة والتحليل
-TICK_SAMPLE_SIZE = 3            # 3 تيك فقط
+TICK_SAMPLE_SIZE = 2            # تم التعديل: 2 تيك فقط
 MAX_CONSECUTIVE_LOSSES = 2    
 MARTINGALE_MULTIPLIER = 14.0  # x14.0
 
@@ -140,28 +140,25 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 # TRADING BOT FUNCTIONS (دوال منطق التداول)
 # ==========================================================
 
-def calculate_target_barrier(last_digits):
+def check_entry_condition(last_digits):
     """
-    تحديد الحاجز بناءً على الرقم الأكثر تكراراً في آخر 3 تيكات.
-    يعود بـ None إذا لم يتكرر أي رقم مرتين على الأقل.
+    التحقق من شرط الدخول الجديد:
+    1. تم جلب 2 تيك.
+    2. الرقم الأخير في التيك الأول يساوي الرقم الأخير في التيك الثاني.
+    يعود بالرقم المتكرر (الحاجز) إذا تحقق الشرط، وإلا None.
     """
-    if not last_digits:
+    if len(last_digits) != TICK_SAMPLE_SIZE:
         return None
         
-    # حساب تكرار الأرقام
-    digit_counts = Counter(last_digits)
+    # last_digits الآن تحتوي على رقمين (آخر رقم من التيك الأول وآخر رقم من التيك الثاني)
+    digit_t1 = last_digits[0]
+    digit_t2 = last_digits[1]
     
-    # الحصول على الرقم الأكثر تكراراً وعدد مرات تكراره
-    if not digit_counts:
-        return None
-
-    most_common_digit, count = digit_counts.most_common(1)[0]
+    # التحقق من التكرار
+    if digit_t1 == digit_t2:
+        return digit_t1 # الرقم المتكرر هو الحاجز
     
-    # إذا تكرر الرقم مرتين أو أكثر، نستخدمه كحاجز.
-    if count >= 2:
-        return most_common_digit
-    
-    return None # لا يوجد رقم مكرر، لا يوجد دخول
+    return None
 
 
 def calculate_martingale_stake(base_stake, current_step, multiplier):
@@ -209,7 +206,7 @@ def apply_martingale_logic(email):
         
         print(f"🔄 [LOSS] PnL: {total_profit_loss:.2f}. Consecutive: {current_data['consecutive_losses']}. Next Stake (x{MARTINGALE_MULTIPLIER}^{current_data['current_step']}) calculated: {round(new_stake, 2):.2f}. Immediate entry attempt next loop.")
         
-    # ✅ حالة الربح (Win) - انتظار حتى ثواني الدخول المحددة في الجولة القادمة
+    # ✅ حالة الربح (Win) - انتظار التيك المناسب في الجولة القادمة
     else: 
         current_data['total_wins'] += 1 if total_profit_loss > 0 else 0 
         current_data['current_step'] = 0 
@@ -217,7 +214,7 @@ def apply_martingale_logic(email):
         current_data['current_stake'] = base_stake_used
         
         entry_result_tag = "WIN" if total_profit_loss > 0 else "DRAW/SPLIT"
-        print(f"✅ [ENTRY RESULT] {entry_result_tag}. PnL: {total_profit_loss:.2f}. Stake reset to base: {base_stake_used:.2f}. Awaiting next ENTRY_SECOND entry.")
+        print(f"✅ [ENTRY RESULT] {entry_result_tag}. PnL: {total_profit_loss:.2f}. Stake reset to base: {base_stake_used:.2f}. Awaiting next ENTRY_SECOND with matching last digits.")
 
     # مسح بيانات العقد
     current_data['current_entry_id'] = None
@@ -297,7 +294,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         is_contract_pending = current_data.get('open_contract_ids')
         is_martingale_step = current_data['consecutive_losses'] > 0
 
-        # --- منطق الانتظار والتحقق من الثواني (فقط في حال لم تكن في دورة مضاعفة) ---
+        # --- منطق الانتظار والتحقق من الثواني ---
         if not is_contract_pending and not is_martingale_step:
             now = datetime.now()
             current_second = now.second
@@ -312,13 +309,12 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 else: # إذا كنا بعد 50، ننتظر حتى 00 في الدقيقة التالية
                     wait_time = (60 - current_second) + next_entry_second 
 
-                # للتأكد من أن الانتظار ليس طويلاً جداً (مثلاً، إذا كانت الثانية 59 وننتظر 00)
                 if wait_time > 0 and wait_time < 60:
                     print(f"⏳ [TIME WAIT] Current second {current_second}. Waiting {wait_time}s until next entry second ({next_entry_second}).")
-                    time.sleep(wait_time + 0.1) # إضافة 0.1s للتأكد من المرور بالثانية المستهدفة
-                    continue # العودة لبداية الحلقة للتأكد من الدخول في الثانية المطلوبة
+                    time.sleep(wait_time + 0.1) 
+                    continue 
             
-            time.sleep(0.5) # انتظار بسيط للتأكد من جاهزية التيكات في الثانية المحددة
+            time.sleep(0.5) 
             
         elif not is_contract_pending and is_martingale_step:
             # حالة الدخول الفوري بعد الخسارة (Martingale Step)
@@ -373,11 +369,11 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 
             # --- منطق التداول العادي (لا يوجد عقود مفتوحة) ---
 
-            # 2. جلب 3 تيك تاريخي
+            # 2. جلب 2 تيك تاريخي
             history_request = {
                 "ticks_history": SYMBOL,
                 "end": "latest",
-                "count": TICK_SAMPLE_SIZE, # القيمة 3
+                "count": TICK_SAMPLE_SIZE, # القيمة 2
                 "style": "ticks"
             }
             history_response = sync_send_and_recv(ws, history_request, "history", timeout=10)
@@ -396,7 +392,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                  print(f"❌ [DATA ERROR] Received only {len(prices)} ticks, expected {TICK_SAMPLE_SIZE}. Skipping entry.")
                  continue
             
-            # يتم ترتيب التيكات من الأقدم للأحدث 
+            # استخراج الرقم الأخير من التيكين (يجب أن يكونا مرتبين من الأقدم للأحدث T1, T2)
             last_digits = [int(str(float(p))[-1]) for p in prices if p is not None]
             
             # تحديث الحالة للتحليل/العرض
@@ -404,15 +400,14 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             current_data['last_valid_tick_price'] = float(prices[-1]) if prices else 0.0
             save_session_data(email, current_data)
 
-            # 3. التحليل واتخاذ القرار (منطق التكرار في 3 تيكات)
+            # 3. التحليل واتخاذ القرار (شرط: تكرار آخر رقم في 2 تيك)
             if len(last_digits) == TICK_SAMPLE_SIZE:
                 
-                # إيجاد الحاجز (الرقم الأكثر تكراراً)
-                target_prediction = calculate_target_barrier(last_digits)
+                target_barrier = check_entry_condition(last_digits)
                 
-                print(f"🧠 [ANALYSIS] Last 3 Ticks Digits: {last_digits}. Most Common Digit (Barrier): {'✅ ' + str(target_prediction) if target_prediction is not None else '❌ NOT FOUND (Count < 2)'}.")
+                print(f"🧠 [ANALYSIS] Last 2 Tick Digits: {last_digits}. Condition (T1=T2) Met? {'✅ YES (Barrier ' + str(target_barrier) + ')' if target_barrier is not None else '❌ NO'}.")
 
-                if target_prediction is not None:
+                if target_barrier is not None:
                     
                     if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES:
                         stop_bot(email, clear_data=True, stop_reason="SL Reached: Max Consecutive Losses reached.")
@@ -427,11 +422,11 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         "parameters": {
                             "amount": round(stake, 2), "basis": "stake", "contract_type": CONTRACT_TYPE,
                             "currency": currency_to_use, "duration": DURATION, "duration_unit": DURATION_UNIT,
-                            "symbol": SYMBOL, "barrier": target_prediction 
+                            "symbol": SYMBOL, "barrier": target_barrier 
                         }
                     }
                     
-                    print(f"🧠 [SINGLE ENTRY] Barrier: {target_prediction} | Stake: {round(stake, 2):.2f}. Sending BUY request...")
+                    print(f"🧠 [SINGLE ENTRY] Barrier: {target_barrier} | Stake: {round(stake, 2):.2f}. Sending BUY request...")
                     buy_response = sync_send_and_recv(ws, trade_request, "buy", timeout=15)
                     
                     if 'error' in buy_response:
@@ -467,7 +462,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     else:
                         print("⚠ [SETTLEMENT] Contract not yet sold. Will attempt recovery next loop.")
                 else:
-                    print("❌ [SKIP] Condition not met (No digit repeated at least twice in 3 ticks). Awaiting next entry.")
+                    print("❌ [SKIP] Condition not met (Last digit not matching in 2 ticks). Awaiting next entry second.")
 
             
         except websocket.WebSocketTimeoutException:
@@ -589,7 +584,7 @@ CONTROL_FORM = """
 
 {% if session_data and session_data.is_running %}
     {% set entry_timing = 'Immediate (Post-Loss) / Wait for Seconds (' + entry_seconds|join(', ') + ') (Post-Win/Base)' %}
-    {% set strategy = 'Digit Differ (R_100 - Strategy: Recurrence Check (' + tick_sample_size|string + ' Ticks, Count >= 2), Timing: ' + entry_timing + ' / BARRIER = RECURRING DIGIT / Conditional Martingale on Loss - x' + martingale_multiplier|string + ' Martingale, Max ' + max_consecutive_losses|string + ' Losses, ' + duration|string + ' Tick)' %}
+    {% set strategy = 'Digit Differ (R_100 - Condition: Last Digit repeats in ' + tick_sample_size|string + ' Ticks, Barrier = Repeating Digit, Timing: ' + entry_timing + ' / Conditional Martingale on Loss - x' + martingale_multiplier|string + ' Martingale, Max ' + max_consecutive_losses|string + ' Losses, ' + duration|string + ' Tick)' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing every 1 second)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -662,7 +657,7 @@ def index():
     email = session['email']
     session_data = get_session_data(email)
 
-    if not session_data.get('is_running') and "stop_reason" in session_data and session_data["stop_reason"] not in ["Stopped Manually", "Running", "Disconnected (Auto-Retry)", "Displayed"]:
+    if not session_data.get('is_running') and "stop_reason" in session_data and session_data["stop_reason"] not in ["Running", "Displayed", "Disconnected (Auto-Retry)"]:
         reason = session_data["stop_reason"]
         
         # يتم عرض رسالة التوقف (البيانات حُذفت في دالة stop_bot)
@@ -685,7 +680,7 @@ def index():
         tick_sample_size=TICK_SAMPLE_SIZE,
         symbol=SYMBOL,
         contract_type_name=contract_type_name,
-        entry_seconds=ENTRY_SECONDS 
+        entry_seconds=ENTRY_SECONDS
     )
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -737,7 +732,7 @@ def start_bot():
     with PROCESS_LOCK: active_processes[email] = process
     
     entry_seconds_str = ', '.join(map(str, ENTRY_SECONDS))
-    flash(f'Bot started successfully. Strategy: Recurrence Check ({TICK_SAMPLE_SIZE} Ticks), Barrier = Recurring Digit, Timing: Immediate (Post-Loss) / Wait for seconds ({entry_seconds_str}) (Post-Win/Base)', 'success')
+    flash(f'Bot started successfully. Strategy: Last Digit Repeats in {TICK_SAMPLE_SIZE} Ticks, Entry Seconds: ({entry_seconds_str}), Martingale: x{MARTINGALE_MULTIPLIER} Conditional', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
