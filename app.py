@@ -20,11 +20,11 @@ DURATION = 1           # مدة الصفقة 1 تيك
 DURATION_UNIT = "t"    
 
 # إعدادات المضاعفة والتحليل
-TICK_SAMPLE_SIZE = 2            # تم التعديل: 2 تيك فقط
+TICK_SAMPLE_SIZE = 2            # 2 تيك فقط
 MAX_CONSECUTIVE_LOSSES = 2    
 MARTINGALE_MULTIPLIER = 14.0  # x14.0
 
-# جديد: الثواني المسموح بها للدخول بعد تحليل التيكات
+# الثواني المسموح بها للدخول بعد تحليل التيكات
 ENTRY_SECONDS = [0, 10, 20, 30, 40, 50] 
 
 # إعدادات العقد
@@ -142,15 +142,12 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 
 def check_entry_condition(last_digits):
     """
-    التحقق من شرط الدخول الجديد:
-    1. تم جلب 2 تيك.
-    2. الرقم الأخير في التيك الأول يساوي الرقم الأخير في التيك الثاني.
+    التحقق من شرط الدخول: الرقم الأخير في التيك الأول يساوي الرقم الأخير في التيك الثاني.
     يعود بالرقم المتكرر (الحاجز) إذا تحقق الشرط، وإلا None.
     """
     if len(last_digits) != TICK_SAMPLE_SIZE:
         return None
         
-    # last_digits الآن تحتوي على رقمين (آخر رقم من التيك الأول وآخر رقم من التيك الثاني)
     digit_t1 = last_digits[0]
     digit_t2 = last_digits[1]
     
@@ -189,7 +186,7 @@ def apply_martingale_logic(email):
         
     base_stake_used = current_data['base_stake']
     
-    # ❌ حالة الخسارة (Loss) - دخول فوري في الجولة القادمة
+    # ❌ حالة الخسارة (Loss) - الدخول في الجولة القادمة سيكون موقوتاً
     if total_profit_loss < 0:
         current_data['total_losses'] += 1 
         current_data['consecutive_losses'] += 1
@@ -204,9 +201,9 @@ def apply_martingale_logic(email):
         new_stake = calculate_martingale_stake(base_stake_used, current_data['current_step'], MARTINGALE_MULTIPLIER)
         current_data['current_stake'] = new_stake
         
-        print(f"🔄 [LOSS] PnL: {total_profit_loss:.2f}. Consecutive: {current_data['consecutive_losses']}. Next Stake (x{MARTINGALE_MULTIPLIER}^{current_data['current_step']}) calculated: {round(new_stake, 2):.2f}. Immediate entry attempt next loop.")
+        print(f"🔄 [LOSS] PnL: {total_profit_loss:.2f}. Consecutive: {current_data['consecutive_losses']}. Next Stake (x{MARTINGALE_MULTIPLIER}^{current_data['current_step']}) calculated: {round(new_stake, 2):.2f}. Awaiting next ENTRY_SECOND.")
         
-    # ✅ حالة الربح (Win) - انتظار التيك المناسب في الجولة القادمة
+    # ✅ حالة الربح (Win) - الدخول في الجولة القادمة سيكون موقوتاً
     else: 
         current_data['total_wins'] += 1 if total_profit_loss > 0 else 0 
         current_data['current_step'] = 0 
@@ -214,7 +211,7 @@ def apply_martingale_logic(email):
         current_data['current_stake'] = base_stake_used
         
         entry_result_tag = "WIN" if total_profit_loss > 0 else "DRAW/SPLIT"
-        print(f"✅ [ENTRY RESULT] {entry_result_tag}. PnL: {total_profit_loss:.2f}. Stake reset to base: {base_stake_used:.2f}. Awaiting next ENTRY_SECOND with matching last digits.")
+        print(f"✅ [ENTRY RESULT] {entry_result_tag}. PnL: {total_profit_loss:.2f}. Stake reset to base: {base_stake_used:.2f}. Awaiting next ENTRY_SECOND.")
 
     # مسح بيانات العقد
     current_data['current_entry_id'] = None
@@ -294,8 +291,8 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         is_contract_pending = current_data.get('open_contract_ids')
         is_martingale_step = current_data['consecutive_losses'] > 0
 
-        # --- منطق الانتظار والتحقق من الثواني ---
-        if not is_contract_pending and not is_martingale_step:
+        # --- منطق الانتظار والتحقق من الثواني (مطبق الآن على جميع حالات الدخول) ---
+        if not is_contract_pending:
             now = datetime.now()
             current_second = now.second
             
@@ -314,12 +311,8 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     time.sleep(wait_time + 0.1) 
                     continue 
             
-            time.sleep(0.5) 
+            time.sleep(0.5) # انتظار بسيط للتأكد من جاهزية التيكات في الثانية المحددة
             
-        elif not is_contract_pending and is_martingale_step:
-            # حالة الدخول الفوري بعد الخسارة (Martingale Step)
-            print("🚀 [IMMEDIATE ENTRY] Consecutive loss detected. Proceeding to fetch ticks immediately for martingale.")
-            time.sleep(0.5)
         elif is_contract_pending:
             # حالة وجود عقد مفتوح
             time.sleep(0.5)
@@ -583,8 +576,8 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set entry_timing = 'Immediate (Post-Loss) / Wait for Seconds (' + entry_seconds|join(', ') + ') (Post-Win/Base)' %}
-    {% set strategy = 'Digit Differ (R_100 - Condition: Last Digit repeats in ' + tick_sample_size|string + ' Ticks, Barrier = Repeating Digit, Timing: ' + entry_timing + ' / Conditional Martingale on Loss - x' + martingale_multiplier|string + ' Martingale, Max ' + max_consecutive_losses|string + ' Losses, ' + duration|string + ' Tick)' %}
+    {% set entry_timing = 'Wait for Seconds (' + entry_seconds|join(', ') + ') (Always)' %}
+    {% set strategy = 'Digit Differ (R_100 - Condition: Last Digit repeats in ' + tick_sample_size|string + ' Ticks, Barrier = Repeating Digit, Timing: ' + entry_timing + ' / Conditional Martingale on Loss (NOT INSTANT) - x' + martingale_multiplier|string + ' Martingale, Max ' + max_consecutive_losses|string + ' Losses, ' + duration|string + ' Tick)' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing every 1 second)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -732,7 +725,7 @@ def start_bot():
     with PROCESS_LOCK: active_processes[email] = process
     
     entry_seconds_str = ', '.join(map(str, ENTRY_SECONDS))
-    flash(f'Bot started successfully. Strategy: Last Digit Repeats in {TICK_SAMPLE_SIZE} Ticks, Entry Seconds: ({entry_seconds_str}), Martingale: x{MARTINGALE_MULTIPLIER} Conditional', 'success')
+    flash(f'Bot started successfully. Strategy: Last Digit Repeats in {TICK_SAMPLE_SIZE} Ticks, Entry Seconds: ({entry_seconds_str}), Martingale: x{MARTINGALE_MULTIPLIER} Conditional (NOT INSTANT)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
