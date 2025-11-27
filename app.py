@@ -22,7 +22,7 @@ DURATION_UNIT = "t"
 # إعدادات المضاعفة والتحليل
 TICK_SAMPLE_SIZE = 2            
 MAX_CONSECUTIVE_LOSSES = 4    
-MARTINGALE_MULTIPLIER = 2.0  # x2.0 
+MARTINGALE_MULTIPLIER = 3.0  # x2.0 
 
 # الثواني المسموح بها للدخول
 ENTRY_SECONDS = [0, 10, 20, 30, 40, 50] 
@@ -162,10 +162,10 @@ def check_entry_condition(prices, last_digits):
     # 2. تحديد الحاجز بناءً على اتجاه السعر (منطق متابعة الاتجاه) ⬅️ تم التعديل هنا
     if price_t1 < price_t2:
         # T1 أصغر من T2 (اتجاه صعودي). نستخدم الحاجز الموجب (+0.05) (TOUCH فوق السعر).
-        return f"+{BARRIER_OFFSET}"
+        return f"-{BARRIER_OFFSET}"
     elif price_t1 > price_t2:
         # T1 أكبر من T2 (اتجاه هبوطي). نستخدم الحاجز السالب (-0.05) (TOUCH تحت السعر).
-        return f"-{BARRIER_OFFSET}"
+        return f"+{BARRIER_OFFSET}"
     else:
         # إذا تساوت الأسعار (نادر)، نتجاهل الدخول
         return None
