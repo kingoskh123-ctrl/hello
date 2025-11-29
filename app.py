@@ -21,16 +21,16 @@ DURATION_UNIT = "t"
 
 # إعدادات المضاعفة والتحليل
 TICK_SAMPLE_SIZE = 5 
-MAX_CONSECUTIVE_LOSSES = 1    
-MARTINGALE_MULTIPLIER = 14.0 # ⬅️ تم التعديل: معامل المضاعفة 19.0
+MAX_CONSECUTIVE_LOSSES = 5    
+MARTINGALE_MULTIPLIER = 2.0 # ⬅️ تم التعديل: معامل المضاعفة 19.0
 
 # الثواني المحددة للدخول (تطبق على جميع الصفقات)
 ENTRY_SECONDS = [0, 10, 20, 30, 40, 50] 
 
 # إعدادات الاستراتيجية الجديدة
 PRICE_DIFFERENCE_THRESHOLD = 0.5 
-HIGHER_BARRIER = -0.7 
-LOWER_BARRIER = 0.7   
+HIGHER_BARRIER = 0.1 
+LOWER_BARRIER = -0.1   
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
