@@ -16,32 +16,32 @@ from collections import Counter
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"       
-DURATION = 6           # ⬅️ تم التعديل: مدة الصفقة 5 تيك
+DURATION = 5           
 DURATION_UNIT = "t"    
 
 # إعدادات المضاعفة والتحليل
 TICK_SAMPLE_SIZE = 5 
-MAX_CONSECUTIVE_LOSSES = 5    
-MARTINGALE_MULTIPLIER = 2.0 # ⬅️ تم التعديل: معامل المضاعفة 19.0
+MAX_CONSECUTIVE_LOSSES = 1    
+MARTINGALE_MULTIPLIER = 19.0 
 
 # الثواني المحددة للدخول (تطبق على جميع الصفقات)
 ENTRY_SECONDS = [0, 10, 20, 30, 40, 50] 
 
 # إعدادات الاستراتيجية الجديدة
 PRICE_DIFFERENCE_THRESHOLD = 0.5 
-HIGHER_BARRIER = 0.1 
-LOWER_BARRIER = -0.1   
+HIGHER_BARRIER = -0.7 
+LOWER_BARRIER = 0.7   
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
 # ==========================================================
-# GLOBAL STATE AND CONTROL FUNCTIONS 
+# GLOBAL STATE AND CONTROL FUNCTIONS (الحالة العامة ووظائف التحكم)
 # ==========================================================
 DEFAULT_SESSION_STATE = {
     "api_token": "",
-    "base_stake": 0.35, 
+    "base_stake": 10, 
     "tp_target": 10.0,
     "is_running": False,
     "current_profit": 0.0,
@@ -147,7 +147,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 # --- End of Persistence and Control functions ---
 
 # ==========================================================
-# TRADING BOT FUNCTIONS 
+# TRADING BOT FUNCTIONS (دوال منطق التداول)
 # ==========================================================
 
 def check_entry_condition(prices, last_digits):
@@ -474,10 +474,15 @@ def bot_core_logic(email, token, stake, tp, currency, account_type, max_loss):
                 trade_request = {
                     "buy": 1, "price": stake_per_trade,
                     "parameters": {
-                        "amount": stake_per_trade, "basis": "stake", "contract_type": params['contract_type'],
-                        "currency": currency_to_use, "duration": DURATION, "duration_unit": DURATION_UNIT,
+                        "amount": stake_per_trade, 
+                        "basis": "stake", 
+                        "contract_type": params['contract_type'],
+                        "currency": currency_to_use, 
+                        "duration": DURATION, 
+                        "duration_unit": DURATION_UNIT,
                         "symbol": SYMBOL, 
-                        "barrier": params['barrier'] 
+                        "barrier": f"{params['barrier']:.5f}", # ✅ FINAL FIX: Ensuring barrier is sent as a formatted string
+                        "barrier_type": "relative" 
                     }
                 }
                 
@@ -623,7 +628,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = 'Higher/Lower (R_100 - Conditional Entry: 5-Tick Trend, Diff >= ' + price_difference_threshold|string + ', Barrier: H/-0.7 L/+0.7 @ ' + entry_seconds|string + 's, Martingale: x' + martingale_multiplier|string + ' - FULLY CONDITIONAL - DURATION: ' + duration|string + ' TICKS - SL/TP Triggers Auto Stop & Clear)' %}
+    {% set strategy = 'Higher/Lower (R_100 - Conditional Entry: 5-Tick Trend, Diff >= ' + price_difference_threshold|string + ', Barrier: H/-0.7 L/+0.7 (Relative) @ ' + entry_seconds|string + 's, Martingale: x' + martingale_multiplier|string + ' - FULLY CONDITIONAL - DURATION: ' + duration|string + ' TICKS - SL/TP Triggers Auto Stop & Clear)' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing every 1 second)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -657,7 +662,7 @@ CONTROL_FORM = """
         <label for="tp">TP Target (USD/tUSDT):</label><br>
         <input type="number" id="tp" name="tp" value="{{ session_data.tp_target|round(2) if session_data else 10.0 }}" step="0.01" required><br>
         
-        <label for="max_loss">Max Consecutive Losses (e.g. 2 to stop after the 2nd loss):</label><br>
+        <label for="max_loss">Max Consecutive Losses (e.g. 1 to stop after 1st loss, 2 to stop after 2nd loss):</label><br>
         <input type="number" id="max_loss" name="max_loss" value="{{ session_data.max_loss if session_data.get('max_loss') is not none else 2 }}" step="1" min="1" required><br>
 
         <button type="submit" style="background-color: green; color: white;">🚀 Start Bot</button>
@@ -798,12 +803,12 @@ def stop_route():
     
     stop_bot(session['email'], clear_data=True, stop_reason="Stopped Manually")
     
-    flash('Bot stopped and session data cleared. Refreshing to show current status.', 'success')
-    
     response = make_response(redirect(url_for('index')))
     response.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
     response.headers["Pragma"] = "no-cache"
     response.headers["Expires"] = "0"
+    
+    flash('Bot stopped and session data cleared. Refreshing to show current status.', 'success')
     return response
 
 @app.route('/logout')
