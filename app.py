@@ -20,10 +20,10 @@ DURATION_UNIT = "t" # ⬅️ وحدة المدة هي التيك (t)
 TICKS_TO_ANALYZE = 5 # ⬅️ 5 تيك للتحليل
 
 # إعدادات الإيقاف التام بعد الخسارة الأولى
-MARTINGALE_STEPS = 4 # تعطيل المضاعفة
-MAX_CONSECUTIVE_LOSSES = 5 # ⬅️ التوقف بعد خسارة متتالية واحدة (1 > 0)
+MARTINGALE_STEPS = 0 # تعطيل المضاعفة
+MAX_CONSECUTIVE_LOSSES = 0 # ⬅️ التوقف بعد خسارة متتالية واحدة (1 > 0)
 MARTINGALE_MULTIPLIER = 2.1
-BARRIER_OFFSET = "0.1" # ⬅️ حاجز الإزاحة (قيمة الحاجز في العقد)
+BARRIER_OFFSET = "0.7" # ⬅️ حاجز الإزاحة (قيمة الحاجز في العقد)
 MOMENTUM_THRESHOLD = "0.5" # ⬅️ الحد الأدنى لفرق السعر المطلوب للزخم (P_diff)
 
 RECONNECT_DELAY = 1
