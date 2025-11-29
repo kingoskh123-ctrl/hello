@@ -64,7 +64,7 @@ DEFAULT_SESSION_STATE = {
     "last_digits_history": [],
     "last_prices_history": [],
     "max_loss": 2, 
-    "last_trade_result": "WIN" # يستخدم لتحديد ما إذا كان الدخول التالي يجب أن ينتظر شرط الثانية
+    "last_trade_result": "WIN" 
 }
 
 active_processes = {}
@@ -72,25 +72,53 @@ PROCESS_LOCK = Lock()
 TRADE_LOCK = Lock() 
 
 # --- Persistence functions ---
+
 def load_persistent_sessions():
     if not os.path.exists(ACTIVE_SESSIONS_FILE): return {}
     try:
         with open(ACTIVE_SESSIONS_FILE, 'r') as f:
-            fcntl.flock(f, fcntl.LOCK_SH)
+            # قفل مشارك للقراءة
+            fcntl.flock(f, fcntl.LOCK_SH) 
             content = f.read()
             fcntl.flock(f, fcntl.LOCK_UN)
             return json.loads(content) if content else {}
-    except: return {}
+    except (json.JSONDecodeError, FileNotFoundError, Exception) as e:
+        # إذا فشلت القراءة (مثل ملف فارغ أو معطوب)، نعود بكائن فارغ
+        return {}
 
+
+# ⬅️ الدالة المعدلة: ضمان الحفظ الذري باستخدام القفل الحصري في نفس العملية
 def save_session_data(email, session_data):
-    all_sessions = load_persistent_sessions()
-    all_sessions[email] = session_data
+    all_sessions = {}
+    
+    # فتح الملف للكتابة والقراءة ('a+') يضمن إنشاءه إذا لم يكن موجوداً
     try:
-        with open(ACTIVE_SESSIONS_FILE, 'w') as f:
+        with open(ACTIVE_SESSIONS_FILE, 'a+') as f:
+            # 1. الحصول على قفل حصري (يمنع أي عملية أخرى من القراءة أو الكتابة)
             fcntl.flock(f, fcntl.LOCK_EX)
+            
+            # 2. قراءة المحتوى الحالي (إذا كان موجوداً)
+            f.seek(0)
+            content = f.read()
+            if content:
+                all_sessions = json.loads(content)
+            
+            # 3. تحديث البيانات
+            all_sessions[email] = session_data
+            
+            # 4. مسح الملف والكتابة من البداية
+            f.seek(0) 
+            f.truncate()
             json.dump(all_sessions, f, indent=4)
+            
+            # 5. تحرير القفل
             fcntl.flock(f, fcntl.LOCK_UN)
-    except: pass
+            
+    except Exception as e: 
+        print(f"❌ [FILE SAVE ERROR] Failed to save session data: {e}")
+        try: fcntl.flock(f, fcntl.LOCK_UN) # محاولة تحرير القفل حتى في حالة الفشل
+        except: pass
+
 
 def get_session_data(email):
     all_sessions = load_persistent_sessions()
@@ -102,12 +130,23 @@ def get_session_data(email):
     return DEFAULT_SESSION_STATE.copy()
 
 def delete_session_data(email):
-    all_sessions = load_persistent_sessions()
-    if email in all_sessions: del all_sessions[email]
+    # استخدام نفس منطق save_session_data للحصول على قفل حصري قبل الحذف
+    all_sessions = {}
     try:
-        with open(ACTIVE_SESSIONS_FILE, 'w') as f:
+        with open(ACTIVE_SESSIONS_FILE, 'a+') as f:
             fcntl.flock(f, fcntl.LOCK_EX)
+            
+            f.seek(0)
+            content = f.read()
+            if content:
+                all_sessions = json.loads(content)
+                if email in all_sessions: 
+                    del all_sessions[email]
+            
+            f.seek(0) 
+            f.truncate()
             json.dump(all_sessions, f, indent=4)
+            
             fcntl.flock(f, fcntl.LOCK_UN)
     except: pass
 
@@ -157,7 +196,6 @@ def calculate_martingale_stake(base_stake, current_step, multiplier):
     return base_stake * (multiplier ** current_step)
 
 
-# ⬅️ تم تبسيط هذه الدالة لمعالجة النتيجة فقط
 def process_trade_result(email, contract_info):
     """ يعالج نتيجة العقد ويحدث حالة البوت لتحديد الصفقة التالية """
     global MARTINGALE_MULTIPLIER, MAX_CONSECUTIVE_LOSSES
@@ -165,7 +203,7 @@ def process_trade_result(email, contract_info):
     
     if not current_data.get('is_running'): return current_data
     
-    total_profit_loss = contract_info.get('profit', 0.0) # جلب الربح/الخسارة
+    total_profit_loss = contract_info.get('profit', 0.0) 
     max_losses_for_check = current_data.get('max_loss', MAX_CONSECUTIVE_LOSSES)
     base_stake_used = current_data['base_stake']
 
@@ -179,7 +217,7 @@ def process_trade_result(email, contract_info):
         
     # ❌ حالة الخسارة (Loss) 
     if total_profit_loss < 0:
-        current_data['total_losses'] += 1 
+        current_data['total_losses'] += 1  
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1
         current_data['last_trade_result'] = "LOSS"
@@ -196,11 +234,15 @@ def process_trade_result(email, contract_info):
         
     # ✅ حالة الربح (Win) أو التعادل (Draw)
     else: 
-        current_data['total_wins'] += 1 if total_profit_loss > 0 else 0 
+        if total_profit_loss > 0:
+            current_data['total_wins'] += 1 
+            current_data['last_trade_result'] = "WIN"
+        else: # التعادل
+            current_data['last_trade_result'] = "DRAW"
+            
         current_data['current_step'] = 0 
         current_data['consecutive_losses'] = 0
         current_data['current_stake'] = base_stake_used
-        current_data['last_trade_result'] = "WIN" if total_profit_loss > 0 else "DRAW"
         
         print(f"✅ [ENTRY RESULT] {current_data['last_trade_result']}. PnL: {total_profit_loss:.2f}. Stake reset to base: {base_stake_used:.2f}.")
 
@@ -208,7 +250,7 @@ def process_trade_result(email, contract_info):
     current_data['open_contract_ids'] = []
     
     currency = current_data.get('currency', 'USD')
-    print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Con. Loss: {current_data['consecutive_losses']}/{max_losses_for_check}, Stake: {current_data['current_stake']:.2f}")
+    print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Con. Loss: {current_data['consecutive_losses']}/{max_losses_for_check}, Stake: {current_data['current_stake']:.2f}, Total Wins: {current_data['total_wins']}, Total Losses: {current_data['total_losses']}")
     
     save_session_data(email, current_data)
     
@@ -238,7 +280,6 @@ def sync_send_and_recv(ws, request_data, expect_msg_type, timeout=15):
         print(f"❌ [SYNC ERROR] Failed to send/receive: {e}. Check network.")
         return {'error': {'message': f"Connection Error: {e}"}}
 
-# ⬅️ تم إعادة بناء دالة bot_core_logic بالكامل لتعمل ضمن جلسة واحدة
 def bot_core_logic(email, token, stake, tp, currency, account_type, max_loss):
     """ Core bot logic (Single session per trade cycle) """
     
@@ -256,7 +297,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type, max_loss):
         "open_contract_ids": [], "contract_profits": {},
         "last_entry_price": 0.0, "last_valid_tick_price": 0.0
     })
-    # تم تصحيح الخطأ السابق
     save_session_data(email, session_data) 
     
     
@@ -305,7 +345,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type, max_loss):
                     # انتظار شرط الثانية
                     print(f"⏳ [WAIT] Awaiting next matching SECOND ({ENTRY_SECONDS}). Current: {current_second}")
                     time.sleep(0.5) 
-                    continue # العودة لبداية الحلقة لجلب البيانات الجديدة والتحقق من التوقف
+                    continue 
 
             # 3. 🛒 تنفيذ الصفقة (Buy)
             if trade_params:
@@ -320,7 +360,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type, max_loss):
                 
                 params = trade_params
                 contract_type_full = f"{params['contract_type']}{params['digit']}"
-                entry_type = "Base Stake" if not is_martingale_step else f"Martingale Step {current_data['current_step'] + 1}" # +1 لأننا سنبدأ المضاعفة هنا
+                entry_type = "Base Stake" if not is_martingale_step else f"Martingale Step {current_data['current_step'] + 1}" 
 
                 trade_request = {
                     "buy": 1, "price": stake_per_trade,
@@ -348,7 +388,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type, max_loss):
                 print(f"⏳ [SETTLEMENT] Contract {contract_id} opened. Waiting for result...")
                 
                 # 4. ⚖️ الانتظار للتسوية (في نفس الجلسة)
-                # ننتظر حتى نحصل على رسالة "proposal_open_contract" مع is_sold=1
                 while True:
                     response = json.loads(ws.recv())
                     
@@ -357,10 +396,9 @@ def bot_core_logic(email, token, stake, tp, currency, account_type, max_loss):
                         
                         # 5. تطبيق المنطق ومعالجة النتيجة
                         updated_data = process_trade_result(email, contract_info)
-                        session_data = updated_data # تحديث session_data للحلقة التالية والتحقق من التوقف
+                        session_data = updated_data 
                         
                         if not updated_data.get('is_running'):
-                            # تم الوصول إلى TP/SL
                             stop_bot(email, clear_data=True, stop_reason=updated_data['stop_reason'])
                             return
                         break 
@@ -368,13 +406,11 @@ def bot_core_logic(email, token, stake, tp, currency, account_type, max_loss):
                     if 'error' in response:
                         print(f"❌ [SETTLEMENT ERROR] Error during settlement wait: {response['error'].get('message', 'Unknown API Error')}. Retrying connection next cycle.")
                         time.sleep(2) 
-                        break # كسر حلقة الانتظار للمحاولة مجددا في دورة جديدة
+                        break 
                     
-                    # لمنع استهلاك المعالج
                     time.sleep(0.01)
 
             else:
-                # إذا لم يتم الدخول بسبب شرط الثواني في وضع Base
                 time.sleep(0.1)
 
         except websocket.WebSocketTimeoutException:
