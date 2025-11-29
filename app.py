@@ -28,7 +28,7 @@ MARTINGALE_MULTIPLIER = 14.0 # ⬅️ تم التعديل: معامل المضا
 ENTRY_SECONDS = [0, 10, 20, 30, 40, 50] 
 
 # إعدادات الاستراتيجية الجديدة
-PRICE_DIFFERENCE_THRESHOLD = 0.7 
+PRICE_DIFFERENCE_THRESHOLD = 0.5 
 HIGHER_BARRIER = -0.7 
 LOWER_BARRIER = 0.7   
 
@@ -45,7 +45,7 @@ DEFAULT_SESSION_STATE = {
     "tp_target": 10.0,
     "is_running": False,
     "current_profit": 0.0,
-    "current_stake": 0.35,                   
+    "current_stake": 10,                   
     "consecutive_losses": 0,
     "current_step": 0,
     "total_wins": 0,
@@ -64,7 +64,7 @@ DEFAULT_SESSION_STATE = {
     "last_two_digits": [9, 9],
     "last_digits_history": [],
     "last_prices_history": [],
-    "max_loss": 2, 
+    "max_loss": 1, 
 }
 
 active_processes = {}
