@@ -12,21 +12,21 @@ import traceback
 from collections import Counter
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (DIGITDIFF 1 / 8 Conditional | x14.0 | D: 1 Tick)
+# BOT CONSTANT SETTINGS 
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"       
-DURATION = 1           # ⬅️ تم التعديل إلى 1 تيك
+DURATION = 1           # مدة الصفقة: 1 تيك
 DURATION_UNIT = "t"    
 
 # إعدادات المضاعفة
 MAX_CONSECUTIVE_LOSSES = 2    
-MARTINGALE_MULTIPLIER = 14.0 # ⬅️ تم التعديل إلى 14.0
+MARTINGALE_MULTIPLIER = 14.0 # معامل المضاعفة: x14.0
 
 # إعدادات استراتيجية DIGITDIFF
 CONTRACT_TYPE_BASE = "DIGITDIFF"
-DIFF_BASE = 1                 
-DIFF_MARTINGALE = 8           
+DIFF_BASE = 1                 # الرقم المختلف للصفقة الأساسية
+DIFF_MARTINGALE = 8           # الرقم المختلف لصفقة المضاعفة
 
 # الثواني المحددة للدخول (تطبق فقط عند الربح)
 ENTRY_SECONDS = [0, 10, 20, 30, 40, 50] 
@@ -36,7 +36,7 @@ USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
 # ==========================================================
-# GLOBAL STATE AND CONTROL FUNCTIONS (الحالة العامة ووظائف التحكم)
+# GLOBAL STATE AND CONTROL FUNCTIONS 
 # ==========================================================
 DEFAULT_SESSION_STATE = {
     "api_token": "",
@@ -146,7 +146,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 # --- End of Persistence and Control functions ---
 
 # ==========================================================
-# TRADING BOT FUNCTIONS (دوال منطق التداول)
+# TRADING BOT FUNCTIONS 
 # ==========================================================
 
 def calculate_martingale_stake(base_stake, current_step, multiplier):
@@ -263,11 +263,13 @@ def bot_core_logic(email, token, stake, tp, currency, account_type, max_loss):
         "open_contract_ids": [], "contract_profits": {},
         "last_entry_price": 0.0, "last_valid_tick_price": 0.0
     })
-    save_session_data(email, current_data)
+    # ⬅️ تم تصحيح الخطأ هنا: نستخدم session_data للحفظ الأولي
+    save_session_data(email, session_data) 
     
     is_settlement_needed = False
     
     while True:
+        # هنا يتم جلب البيانات في كل دورة
         current_data = get_session_data(email)
         
         # 1. 🛑 التحقق من التوقف
@@ -372,7 +374,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type, max_loss):
                         "basis": "stake", 
                         "contract_type": params['contract_type'],
                         "currency": currency_to_use, 
-                        "duration": DURATION, # ⬅️ القيمة المحدثة: 1
+                        "duration": DURATION, 
                         "duration_unit": DURATION_UNIT,
                         "symbol": SYMBOL, 
                         "barrier": params['digit'] 
@@ -515,7 +517,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = 'DIGIT DIFF (Base: ' + diff_base|string + ' @ ' + entry_seconds|string + 's | Martingale: ' + diff_martingale|string + ' IMMEDIATE) - DURATION: ' + duration|string + ' Ticks - SL/TP Triggers Auto Stop & Clear)' %}
+    {% set strategy = 'DIGIT DIFF (Base: ' + diff_base|string + ' @ ' + entry_seconds|string + 's | Martingale: ' + diff_martingale|string + ' IMMEDIATE) - DURATION: ' + duration|string + ' TICK - Multiplier: x' + martingale_multiplier|string + ' - SL/TP Triggers Auto Stop & Clear' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing every 1 second)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -548,7 +550,7 @@ CONTROL_FORM = """
         <label for="tp">TP Target (USD/tUSDT):</label><br>
         <input type="number" id="tp" name="tp" value="{{ session_data.tp_target|round(2) if session_data else 10.0 }}" step="0.01" required><br>
         
-        <label for="max_loss">Max Consecutive Losses (e.g. 1 to stop after 1st loss, 2 to stop after 2nd loss):</label><br>
+        <label for="max_loss">Max Consecutive Losses (2 means 1 Martingale step):</label><br>
         <input type="number" id="max_loss" name="max_loss" value="{{ session_data.max_loss if session_data.get('max_loss') is not none else 2 }}" step="1" min="1" required><br>
 
         <button type="submit" style="background-color: green; color: white;">🚀 Start Bot</button>
@@ -680,7 +682,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Strategy: DIGIT DIFF (Base: {DIFF_BASE} @ {ENTRY_SECONDS}s | Martingale: {DIFF_MARTINGALE} IMMEDIATE), Max Loss: {max_loss}, Martingale: x{MARTINGALE_MULTIPLIER} - DURATION: {DURATION} Ticks - **SL/TP Triggers Auto Stop & Clear**.', 'success')
+    flash(f'Bot started successfully. Strategy: DIGIT DIFF (Base: {DIFF_BASE} @ {ENTRY_SECONDS}s | Martingale: {DIFF_MARTINGALE} IMMEDIATE), Max Loss: {max_loss}, Martingale: x{MARTINGALE_MULTIPLIER} - DURATION: {DURATION} Tick - **SL/TP Triggers Auto Stop & Clear**.', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
