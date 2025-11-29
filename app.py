@@ -22,7 +22,8 @@ TICKS_TO_ANALYZE = 5 # ⬅️ 5 تيك للتحليل
 MARTINGALE_STEPS = 0 # تعطيل المضاعفة
 MAX_CONSECUTIVE_LOSSES = 0 # ⬅️ التوقف بعد خسارة متتالية واحدة (1 > 0)
 MARTINGALE_MULTIPLIER = 2.1
-BARRIER_OFFSET = "0.7" # حاجز الإزاحة
+BARRIER_OFFSET = "0.7" # ⬅️ حاجز الإزاحة (قيمة الحاجز في العقد)
+MOMENTUM_THRESHOLD = "0.5" # ⬅️ الحد الأدنى لفرق السعر المطلوب للزخم (P_diff)
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
@@ -264,7 +265,7 @@ def apply_martingale_logic(email):
 
 def start_new_single_trade(email):
     """ يحلل آخر 5 تيك ويبدأ صفقة بناءً على الاتجاه وفرق السعر المطلوب """
-    global is_contract_open, BARRIER_OFFSET, CONTRACT_TYPE_HIGHER, CONTRACT_TYPE_LOWER, MARTINGALE_STEPS, TICKS_TO_ANALYZE
+    global is_contract_open, BARRIER_OFFSET, CONTRACT_TYPE_HIGHER, CONTRACT_TYPE_LOWER, MARTINGALE_STEPS, TICKS_TO_ANALYZE, MOMENTUM_THRESHOLD
 
     current_data = get_session_data(email)
 
@@ -288,8 +289,11 @@ def start_new_single_trade(email):
     price_difference = last_tick_price - first_tick_price
     absolute_diff = abs(price_difference)
 
-    # تحديد الحد الأدنى للفرق المطلوب (0.7)
-    required_diff = float(BARRIER_OFFSET)
+    # تحديد الحد الأدنى للفرق المطلوب (0.5) <--- MOMENTUM_THRESHOLD
+    required_diff = float(MOMENTUM_THRESHOLD)
+
+    # تحديد قيمة الحاجز المستخدمة في الصفقة (0.7) <--- BARRIER_OFFSET
+    barrier_offset_value = BARRIER_OFFSET
 
     # 3. تطبيق شرط الفرق في السعر ونوع العقد
     contract_type_to_use = None
@@ -298,19 +302,19 @@ def start_new_single_trade(email):
 
     stake_to_use = current_data['current_stake_higher']
 
-    # ⬆️ إذا كان الاتجاه صاعداً وفرق السعر ≥ 0.7
+    # ⬆️ إذا كان الاتجاه صاعداً وفرق السعر ≥ 0.5
     if price_difference > 0 and absolute_diff >= required_diff:
         # يدخل HIGHER مع حاجز سالب -0.7
         contract_type_to_use = CONTRACT_TYPE_HIGHER
-        barrier_to_use = f"-{BARRIER_OFFSET}"
-        strategy_tag = f"5 BULLISH Ticks (Diff >= {required_diff}) -> HIGHER -{BARRIER_OFFSET}"
+        barrier_to_use = f"-{barrier_offset_value}"
+        strategy_tag = f"5 BULLISH Ticks (Diff >= {required_diff}) -> HIGHER -{barrier_offset_value}"
 
-    # ⬇️ إذا كان الاتجاه هابطاً وفرق السعر ≥ 0.7
+    # ⬇️ إذا كان الاتجاه هابطاً وفرق السعر ≥ 0.5
     elif price_difference < 0 and absolute_diff >= required_diff:
         # يدخل LOWER مع حاجز موجب +0.7
         contract_type_to_use = CONTRACT_TYPE_LOWER
-        barrier_to_use = f"+{BARRIER_OFFSET}"
-        strategy_tag = f"5 BEARISH Ticks (Diff >= {required_diff}) -> LOWER +{BARRIER_OFFSET}"
+        barrier_to_use = f"+{barrier_offset_value}"
+        strategy_tag = f"5 BEARISH Ticks (Diff >= {required_diff}) -> LOWER +{barrier_offset_value}"
 
     else:
         # لا يوجد زخم كافٍ
@@ -592,7 +596,7 @@ CONTROL_FORM = """
 
 {% if session_data and session_data.is_running %}
     {% set timing_logic = "0, 10, 20, 30, 40, 50 Sec" %}
-    {% set strategy = ticks_to_analyze|string + "-Tick Analysis (Momentum " + barrier_offset + " | Duration " + duration|string + " Ticks) (Stop on 1st Loss)" %}
+    {% set strategy = ticks_to_analyze|string + "-Tick Analysis (Momentum " + momentum_threshold + " | Barrier " + barrier_offset + " | Duration " + duration|string + " Ticks) (Stop on 1st Loss)" %}
 
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -689,6 +693,7 @@ def index():
         martingale_multiplier=MARTINGALE_MULTIPLIER,
         duration=DURATION,
         barrier_offset=BARRIER_OFFSET,
+        momentum_threshold=MOMENTUM_THRESHOLD, # ⬅️ متغير جديد
         symbol=SYMBOL,
         ticks_to_analyze=TICKS_TO_ANALYZE
     )
@@ -734,6 +739,8 @@ def start_bot():
     except ValueError:
         flash("Invalid stake or TP value (Base Stake must be >= 0.35).", 'error')
         return redirect(url_for('index'))
+    
+    strategy_desc = f"5-Tick Momentum (R_100 - P_diff >= {MOMENTUM_THRESHOLD} - Barrier: {BARRIER_OFFSET} - Stop on 1st Loss)"
 
     process = Process(target=bot_core_logic, args=(email, token, stake, tp, currency, account_type))
     process.daemon = True
@@ -741,7 +748,7 @@ def start_bot():
 
     with PROCESS_LOCK: active_processes[email] = process
 
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: 5-Tick Momentum (R_100 - Entry @ Sec 0, 10, 20, 30, 40, 50 - Stop on 1st Loss)', 'success')
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {strategy_desc}', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
