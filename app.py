@@ -18,8 +18,8 @@ DURATION = 1
 DURATION_UNIT = "t"        
 MARTINGALE_STEPS = 1       
 MAX_CONSECUTIVE_LOSSES = 2 
-RECONNECT_DELAY = 0        # 💡 التعديل: 0 ثانية للدخول الفوري (الخسارة)
-WIN_DELAY = 20             # 💡 التعديل: 20 ثانية تأخير بعد الربح
+RECONNECT_DELAY = 0        # 0 ثانية للدخول الفوري (الخسارة)
+WIN_DELAY = 20             # 20 ثانية تأخير بعد الربح
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
@@ -27,7 +27,7 @@ ACTIVE_SESSIONS_FILE = "active_sessions.json"
 BASE_CONTRACT_TYPE = "DIGITDIFF" 
 BASE_BARRIER = 1             # حاجز الدخول الأساسي: DIGITDIFF 1
 MARTINGALE_BARRIER = 8       # حاجز المضاعفة: DIGITDIFF 8
-MARTINGALE_MULTIPLIER = 14.0 
+MARTINGALE_MULTIPLIER = 14.0 # 💡 تم التعديل إلى 14.0
 # ==========================================================
 
 # ==========================================================
@@ -163,7 +163,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 # ==========================================================
 
 def calculate_martingale_stake(base_stake, current_stake, current_step):
-    """ منطق المضاعفة (الرهان الخاسر × 19) """
+    """ منطق المضاعفة (الرهان الخاسر × 14) """
     if current_step == 0:
         return base_stake
     if current_step <= MARTINGALE_STEPS:
@@ -202,7 +202,7 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_value=
         pass
 
 def check_pnl_limits(email, profit_loss, last_action_type, ws_app):
-    """ 💡 منطق تحديث الحالة وتبديل الحواجز وتفعيل التأخير الديناميكي """
+    """ منطق تحديث الحالة وتبديل الحواجز وتفعيل التأخير الديناميكي """
     global is_contract_open, BASE_BARRIER, MARTINGALE_BARRIER, RECONNECT_DELAY, WIN_DELAY
     
     is_contract_open[email] = False
@@ -445,7 +445,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         if current_data.get('is_running') is False and current_data.get('stop_reason') != "Disconnected (Auto-Retry)": 
             break
         
-        delay_seconds = RECONNECT_DELAY # الافتراضي: 0 ثانية (للمضاعفة الفورية)
+        delay_seconds = RECONNECT_DELAY # الافتراضي: 0 ثانية (للمضاعفة الفورية عند الخسارة)
         
         # إذا كانت current_step تساوي 0، فهذا يعني أن الصفقة الأخيرة ربحت
         if current_data.get('current_step', 0) == 0:
@@ -457,7 +457,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
     print(f"🛑 [PROCESS] Bot process loop ended for {email}.")
 
 # ==========================================================
-# FLASK APP SETUP AND ROUTES (لم تتغير)
+# FLASK APP SETUP AND ROUTES
 # ==========================================================
 
 app = Flask(__name__)
@@ -468,24 +468,24 @@ AUTH_FORM = """
 <!doctype html>
 <title>Login - Deriv Bot</title>
 <style>
-    body { font-family: Arial, sans-serif; padding: 20px; max-width: 400px; margin: auto; }
-    h1 { color: #007bff; }
-    input[type="email"] { width: 100%; padding: 10px; margin-top: 5px; margin-bottom: 15px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
-    button { background-color: blue; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; }
+    body { font-family: Arial, sans-serif; padding: 20px; max-width: 400px; margin: auto; }
+    h1 { color: #007bff; }
+    input[type="email"] { width: 100%; padding: 10px; margin-top: 5px; margin-bottom: 15px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
+    button { background-color: blue; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; }
 </style>
 <h1>Deriv Bot Login</h1>
 <p>Please enter your authorized email address:</p>
 {% with messages = get_flashed_messages(with_categories=true) %}
-    {% if messages %}
-        {% for category, message in messages %}
-            <p style="color:red;">{{ message }}</p>
-        {% endfor %}
-    {% endif %}
+    {% if messages %}
+        {% for category, message in messages %}
+            <p style="color:red;">{{ message }}</p>
+        {% endfor %}
+    {% endif %}
 {% endwith %}
 <form method="POST" action="{{ url_for('login') }}">
-    <label for="email">Email:</label><br>
-    <input type="email" id="email" name="email" required><br><br>
-    <button type="submit">Login</button>
+    <label for="email">Email:</label><br>
+    <input type="email" id="email" name="email" required><br><br>
+    <button type="submit">Login</button>
 </form>
 """
 
@@ -494,231 +494,231 @@ CONTROL_FORM = """
 <title>Control Panel</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
-    body {
-        font-family: Arial, sans-serif;
-        padding: 10px;
-        max-width: 600px;
-        margin: auto;
-        direction: rtl;
-        text-align: right;
-    }
-    h1 {
-        color: #007bff;
-        font-size: 1.8em;
-        border-bottom: 2px solid #eee;
-        padding-bottom: 10px;
-    }
-    .status-running {
-        color: green;
-        font-weight: bold;
-        font-size: 1.3em;
-    }
-    .status-stopped {
-        color: red;
-        font-weight: bold;
-        font-size: 1.3em;
-    }
-    input[type="text"], input[type="number"], select {
-        width: 98%;
-        padding: 10px;
-        margin-top: 5px;
-        margin-bottom: 10px;
-        border: 1px solid #ccc;
-        border-radius: 4px;
-        box-sizing: border-box;
-        text-align: right;
-        direction: rtl;
-    }
-    form button {
-        padding: 12px 20px;
-        border: none;
-        border-radius: 5px;
-        cursor: pointer;
-        font-size: 1.1em;
-        margin-top: 15px;
-        width: 100%;
-    }
+    body {
+        font-family: Arial, sans-serif;
+        padding: 10px;
+        max-width: 600px;
+        margin: auto;
+        direction: rtl;
+        text-align: right;
+    }
+    h1 {
+        color: #007bff;
+        font-size: 1.8em;
+        border-bottom: 2px solid #eee;
+        padding-bottom: 10px;
+    }
+    .status-running {
+        color: green;
+        font-weight: bold;
+        font-size: 1.3em;
+    }
+    .status-stopped {
+        color: red;
+        font-weight: bold;
+        font-size: 1.3em;
+    }
+    input[type="text"], input[type="number"], select {
+        width: 98%;
+        padding: 10px;
+        margin-top: 5px;
+        margin-bottom: 10px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        box-sizing: border-box;
+        text-align: right;
+        direction: rtl;
+    }
+    form button {
+        padding: 12px 20px;
+        border: none;
+        border-radius: 5px;
+        cursor: pointer;
+        font-size: 1.1em;
+        margin-top: 15px;
+        width: 100%;
+    }
 </style>
 <h1>لوحة تحكم البوت | المستخدم: {{ email }}</h1>
 <hr>
 
 {% with messages = get_flashed_messages(with_categories=true) %}
-    {% if messages %}
-        {% for category, message in messages %}
-            <p style="color:{{ 'green' if category == 'success' else ('blue' if category == 'info' else 'red') }};">{{ message }}</p>
-        {% endfor %}
-        
-        {% if session_data and session_data.stop_reason and session_data.stop_reason not in ["Running", "Disconnected (Auto-Retry)"] %}
-            <p style="color:red; font-weight:bold;">آخر سبب للتوقف: {{ session_data.stop_reason }}</p>
-        {% endif %}
-    {% endif %}
+    {% if messages %}
+        {% for category, message in messages %}
+            <p style="color:{{ 'green' if category == 'success' else ('blue' if category == 'info' else 'red') }};">{{ message }}</p>
+        {% endfor %}
+        
+        {% if session_data and session_data.stop_reason and session_data.stop_reason not in ["Running", "Disconnected (Auto-Retry)"] %}
+            <p style="color:red; font-weight:bold;">آخر سبب للتوقف: {{ session_data.stop_reason }}</p>
+        {% endif %}
+    {% endif %}
 {% endwith %}
 
 
 {% if session_data and session_data.is_running or session_data.stop_reason == "Disconnected (Auto-Retry)" %}
-    {% set strategy = base_contract_type + " (1:" + base_barrier|string + " & 8 | مضاعفة فورية x" + 19|string + ")" %}
-    
-    <p class="status-running">✅ البوت قيد التشغيل! (يتم التحديث تلقائيًا)</p>
-    {% if session_data.stop_reason == "Disconnected (Auto-Retry)" %}
+    {% set strategy = base_contract_type + " (1:" + base_barrier|string + " & 8 | مضاعفة فورية x" + 14|string + ")" %}
+    
+    <p class="status-running">✅ البوت قيد التشغيل! (يتم التحديث تلقائيًا)</p>
+    {% if session_data.stop_reason == "Disconnected (Auto-Retry)" %}
     {% set delay_msg = "انتظار 20 ثانية" if session_data.current_step == 0 else "إعادة دخول فوري" %}
-    <p style="color:orange; font-weight:bold;">⚠ {{ delay_msg }} (خطوة {{ session_data.current_step }}/{{ martingale_steps }})</p>
-    {% endif %}
-    <p>نوع الحساب: {{ session_data.account_type.upper() }} | العملة: {{ session_data.currency }}</p>
-    <p>صافي الربح: {{ session_data.currency }} {{ session_data.current_profit|round(2) }}</p>
-    <p>الرهان الحالي: {{ session_data.currency }} {{ session_data.current_stake|round(2) }}</p>
-    <p>الخطوة: {{ session_data.current_step }} / {{ martingale_steps }} (أقصى خسارة متتالية: {{ max_consecutive_losses }})</p>
-    <p>الإحصائيات: {{ session_data.total_wins }} ربح | {{ session_data.total_losses }} خسارة</p>
-    <p style="font-weight: bold; color: green;">سعر الدخول الأخير: {{ session_data.last_entry_price|round(5) }}</p>
-    <p style="font-weight: bold; color: purple;">سعر التيك الأخير: {{ session_data.last_valid_tick_price|round(5) }}</p>
-    {% if session_data.last_trade_barrier is not none %}
-        <p style="font-weight: bold; color: blue;">الرقم الهدف المستخدم: {{ session_data.last_trade_barrier }}</p>
-    {% endif %}
-    <p style="font-weight: bold; color: #007bff;">الاستراتيجية الحالية: {{ strategy }}</p>
-    
-    <form method="POST" action="{{ url_for('stop_route') }}">
-        <button type="submit" style="background-color: red; color: white;">🛑 إيقاف البوت</button>
-    </form>
+    <p style="color:orange; font-weight:bold;">⚠ {{ delay_msg }} (خطوة {{ session_data.current_step }}/{{ martingale_steps }})</p>
+    {% endif %}
+    <p>نوع الحساب: {{ session_data.account_type.upper() }} | العملة: {{ session_data.currency }}</p>
+    <p>صافي الربح: {{ session_data.currency }} {{ session_data.current_profit|round(2) }}</p>
+    <p>الرهان الحالي: {{ session_data.currency }} {{ session_data.current_stake|round(2) }}</p>
+    <p>الخطوة: {{ session_data.current_step }} / {{ martingale_steps }} (أقصى خسارة متتالية: {{ max_consecutive_losses }})</p>
+    <p>الإحصائيات: {{ session_data.total_wins }} ربح | {{ session_data.total_losses }} خسارة</p>
+    <p style="font-weight: bold; color: green;">سعر الدخول الأخير: {{ session_data.last_entry_price|round(5) }}</p>
+    <p style="font-weight: bold; color: purple;">سعر التيك الأخير: {{ session_data.last_valid_tick_price|round(5) }}</p>
+    {% if session_data.last_trade_barrier is not none %}
+        <p style="font-weight: bold; color: blue;">الرقم الهدف المستخدم: {{ session_data.last_trade_barrier }}</p>
+    {% endif %}
+    <p style="font-weight: bold; color: #007bff;">الاستراتيجية الحالية: {{ strategy }}</p>
+    
+    <form method="POST" action="{{ url_for('stop_route') }}">
+        <button type="submit" style="background-color: red; color: white;">🛑 إيقاف البوت</button>
+    </form>
 {% else %}
-    <p class="status-stopped">🛑 البوت متوقف. أدخل الإعدادات لبدء جلسة جديدة.</p>
-    <form method="POST" action="{{ url_for('start_bot') }}">
+    <p class="status-stopped">🛑 البوت متوقف. أدخل الإعدادات لبدء جلسة جديدة.</p>
+    <form method="POST" action="{{ url_for('start_bot') }}">
 
-        <label for="account_type">نوع الحساب:</label><br>
-        <select id="account_type" name="account_type" required>
-            <option value="demo" selected>تجريبي (USD)</option>
-            <option value="live">حقيقي (tUSDT)</option>
-        </select><br>
+        <label for="account_type">نوع الحساب:</label><br>
+        <select id="account_type" name="account_type" required>
+            <option value="demo" selected>تجريبي (USD)</option>
+            <option value="live">حقيقي (tUSDT)</option>
+        </select><br>
 
-        <label for="token">رمز API من Deriv:</label><br>
-        <input type="text" id="token" name="token" required value="{{ session_data.api_token if session_data else '' }}" {% if session_data and session_data.api_token and session_data.is_running is not none %}readonly{% endif %}><br>
-        
-        <label for="stake">الرهان الأساسي (USD/tUSDT):</label><br>
-        <input type="number" id="stake" name="stake" value="{{ session_data.base_stake|round(2) if session_data else 0.35 }}" step="0.01" min="0.35" required><br>
-        
-        <label for="tp">هدف الربح (USD/tUSDT):</label><br>
-        <input type="number" id="tp" name="tp" value="{{ session_data.tp_target|round(2) if session_data else 10.0 }}" step="0.01" required><br>
-        
-        <button type="submit" style="background-color: green; color: white;">🚀 بدء البوت</button>
-    </form>
+        <label for="token">رمز API من Deriv:</label><br>
+        <input type="text" id="token" name="token" required value="{{ session_data.api_token if session_data else '' }}" {% if session_data and session_data.api_token and session_data.is_running is not none %}readonly{% endif %}><br>
+        
+        <label for="stake">الرهان الأساسي (USD/tUSDT):</label><br>
+        <input type="number" id="stake" name="stake" value="{{ session_data.base_stake|round(2) if session_data else 0.35 }}" step="0.01" min="0.35" required><br>
+        
+        <label for="tp">هدف الربح (USD/tUSDT):</label><br>
+        <input type="number" id="tp" name="tp" value="{{ session_data.tp_target|round(2) if session_data else 10.0 }}" step="0.01" required><br>
+        
+        <button type="submit" style="background-color: green; color: white;">🚀 بدء البوت</button>
+    </form>
 {% endif %}
 <hr>
 <a href="{{ url_for('logout') }}" style="display: block; text-align: center; margin-top: 15px; font-size: 1.1em;">تسجيل الخروج</a>
 
 <script>
-    function autoRefresh() {
-        var isRunning = {{ 'true' if session_data and session_data.is_running or session_data.stop_reason == "Disconnected (Auto-Retry)" else 'false' }};
-        
-        if (isRunning) {
-            setTimeout(function() {
-                window.location.reload();
-            }, 1000); 
-        }
-    }
+    function autoRefresh() {
+        var isRunning = {{ 'true' if session_data and session_data.is_running or session_data.stop_reason == "Disconnected (Auto-Retry)" else 'false' }};
+        
+        if (isRunning) {
+            setTimeout(function() {
+                window.location.reload();
+            }, 1000); // 💡 تم التعديل إلى 1000 ميلي ثانية
+        }
+    }
 
-    autoRefresh();
+    autoRefresh();
 </script>
 """
 
 @app.before_request
 def check_user_status():
-    if request.endpoint in ('login', 'auth_page', 'logout', 'static'): return
-    if 'email' in session:
-        email = session['email']
-        allowed_users = load_allowed_users()
-        if email.lower() not in allowed_users:
-            session.pop('email', None)
-            flash('Your access has been revoked. Please log in again.', 'error')
-            return redirect(url_for('auth_page'))
+    if request.endpoint in ('login', 'auth_page', 'logout', 'static'): return
+    if 'email' in session:
+        email = session['email']
+        allowed_users = load_allowed_users()
+        if email.lower() not in allowed_users:
+            session.pop('email', None)
+            flash('Your access has been revoked. Please log in again.', 'error')
+            return redirect(url_for('auth_page'))
 
 @app.route('/')
 def index():
-    if 'email' not in session: return redirect(url_for('auth_page'))
-    email = session['email']
-    session_data = get_session_data(email)
+    if 'email' not in session: return redirect(url_for('auth_page'))
+    email = session['email']
+    session_data = get_session_data(email)
 
-    if not session_data.get('is_running') and "stop_reason" in session_data and session_data["stop_reason"] not in ["Stopped Manually", "Running", "Disconnected (Auto-Retry)", "Displayed"]:
-        reason = session_data["stop_reason"]
-        if reason == "SL Reached": flash(f"🛑 STOP: الحد الأقصى للخسارة ({MAX_CONSECUTIVE_LOSSES} خسارات متتالية أو تجاوز {MARTINGALE_STEPS} خطوات مضاعفة) تم الوصول إليه! (SL Reached)", 'error')
-        elif reason == "TP Reached": flash(f"✅ GOAL: هدف الربح ({session_data['tp_target']} {session_data.get('currency', 'USD')}) تم الوصول إليه بنجاح! (TP Reached)", 'success')
-        elif reason.startswith("API Buy Error"): flash(f"❌ API Error: {reason}. Check your token and account status.", 'error')
-            
-        session_data['stop_reason'] = "Displayed"
-        save_session_data(email, session_data)
-        delete_session_data(email)
+    if not session_data.get('is_running') and "stop_reason" in session_data and session_data["stop_reason"] not in ["Stopped Manually", "Running", "Disconnected (Auto-Retry)", "Displayed"]:
+        reason = session_data["stop_reason"]
+        if reason == "SL Reached": flash(f"🛑 STOP: الحد الأقصى للخسارة ({MAX_CONSECUTIVE_LOSSES} خسارات متتالية أو تجاوز {MARTINGALE_STEPS} خطوات مضاعفة) تم الوصول إليه! (SL Reached)", 'error')
+        elif reason == "TP Reached": flash(f"✅ GOAL: هدف الربح ({session_data['tp_target']} {session_data.get('currency', 'USD')}) تم الوصول إليه بنجاح! (TP Reached)", 'success')
+        elif reason.startswith("API Buy Error"): flash(f"❌ API Error: {reason}. Check your token and account status.", 'error')
+            
+        session_data['stop_reason'] = "Displayed"
+        save_session_data(email, session_data)
+        delete_session_data(email)
 
-    return render_template_string(CONTROL_FORM,
-        email=email,
-        session_data=session_data,
-        martingale_steps=MARTINGALE_STEPS,
-        max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
-        base_contract_type=BASE_CONTRACT_TYPE, # 💡 تمرير الثوابت الجديدة
+    return render_template_string(CONTROL_FORM,
+        email=email,
+        session_data=session_data,
+        martingale_steps=MARTINGALE_STEPS,
+        max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
+        base_contract_type=BASE_CONTRACT_TYPE, # 💡 تمرير الثوابت الجديدة
         base_barrier=BASE_BARRIER,
-        duration=DURATION  
-    )
+        duration=DURATION  
+    )
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    if request.method == 'POST':
-        email = request.form['email'].lower()
-        allowed_users = load_allowed_users()
-        if email in allowed_users:
-            session['email'] = email
-            flash('Login successful.', 'success')
-            return redirect(url_for('index'))
-        else:
-            flash('Email not authorized.', 'error')
-            return redirect(url_for('auth_page'))
-    return redirect(url_for('auth_page'))
+    if request.method == 'POST':
+        email = request.form['email'].lower()
+        allowed_users = load_allowed_users()
+        if email in allowed_users:
+            session['email'] = email
+            flash('Login successful.', 'success')
+            return redirect(url_for('index'))
+        else:
+            flash('Email not authorized.', 'error')
+            return redirect(url_for('auth_page'))
+    return redirect(url_for('auth_page'))
 
 @app.route('/auth')
 def auth_page():
-    if 'email' in session: return redirect(url_for('index'))
-    return render_template_string(AUTH_FORM)
+    if 'email' in session: return redirect(url_for('index'))
+    return render_template_string(AUTH_FORM)
 
 @app.route('/start', methods=['POST'])
 def start_bot():
-    global active_processes, BASE_CONTRACT_TYPE
-    if 'email' not in session: return redirect(url_for('auth_page'))
-    email = session['email']
-    
-    with PROCESS_LOCK:
-        if email in active_processes and active_processes[email].is_alive():
-            flash('Bot is already running.', 'info')
-            return redirect(url_for('index'))
-            
-    try:
-        account_type = request.form['account_type']
-        currency = "USD" if account_type == 'demo' else "tUSDT"
-        current_data = get_session_data(email)
-        token = request.form['token'] if not current_data.get('api_token') or request.form.get('token') != current_data['api_token'] else current_data['api_token']
-        stake = float(request.form['stake'])
-        tp = float(request.form['tp'])
-    except ValueError:
-        flash("Invalid stake or TP value.", 'error')
-        return redirect(url_for('index'))
-        
-    process = Process(target=bot_core_logic, args=(email, token, stake, tp, currency, account_type))
-    process.daemon = True
-    process.start()
-    
-    with PROCESS_LOCK: active_processes[email] = process
-    
-    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {BASE_CONTRACT_TYPE} 1 & 8 (x19 Dynamic Martingale)', 'success')
-    return redirect(url_for('index'))
+    global active_processes, BASE_CONTRACT_TYPE
+    if 'email' not in session: return redirect(url_for('auth_page'))
+    email = session['email']
+    
+    with PROCESS_LOCK:
+        if email in active_processes and active_processes[email].is_alive():
+            flash('Bot is already running.', 'info')
+            return redirect(url_for('index'))
+            
+    try:
+        account_type = request.form['account_type']
+        currency = "USD" if account_type == 'demo' else "tUSDT"
+        current_data = get_session_data(email)
+        token = request.form['token'] if not current_data.get('api_token') or request.form.get('token') != current_data['api_token'] else current_data['api_token']
+        stake = float(request.form['stake'])
+        tp = float(request.form['tp'])
+    except ValueError:
+        flash("Invalid stake or TP value.", 'error')
+        return redirect(url_for('index'))
+        
+    process = Process(target=bot_core_logic, args=(email, token, stake, tp, currency, account_type))
+    process.daemon = True
+    process.start()
+    
+    with PROCESS_LOCK: active_processes[email] = process
+    
+    flash(f'Bot started successfully. Currency: {currency}. Account: {account_type.upper()}. Strategy: {BASE_CONTRACT_TYPE} 1 & 8 (x{MARTINGALE_MULTIPLIER} Dynamic Martingale)', 'success')
+    return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
 def stop_route():
-    if 'email' not in session: return redirect(url_for('auth_page'))
-    stop_bot(session['email'], clear_data=True, stop_reason="Stopped Manually")
-    flash('Bot stopped and session data cleared.', 'success')
-    return redirect(url_for('index'))
+    if 'email' not in session: return redirect(url_for('auth_page'))
+    stop_bot(session['email'], clear_data=True, stop_reason="Stopped Manually")
+    flash('Bot stopped and session data cleared.', 'success')
+    return redirect(url_for('index'))
 
 @app.route('/logout')
 def logout():
-    session.pop('email', None)
-    flash('Logged out successfully.', 'success')
-    return redirect(url_for('auth_page'))
+    session.pop('email', None)
+    flash('Logged out successfully.', 'success')
+    return redirect(url_for('auth_page'))
 
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
