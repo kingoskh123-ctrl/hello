@@ -31,8 +31,8 @@ USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 LAST_TRADE_TIME_FILE = "last_trade_time.json"
 
-CONTRACT_TYPE_HIGHER = "CALL"
-CONTRACT_TYPE_LOWER = "PUT"
+CONTRACT_TYPE_HIGHER = "PUT"
+CONTRACT_TYPE_LOWER = "CALL"
 
 # ==========================================================
 
@@ -268,14 +268,14 @@ def analyze_and_trade(email, ws_app, ticks_history, last_tick_price):
     # ⬆️ إذا كان الاتجاه صاعداً وفرق السعر ≥ 0.5
     if price_difference > 0 and absolute_diff >= required_diff:
         contract_type_to_use = CONTRACT_TYPE_HIGHER
-        barrier_to_use = f"-{barrier_offset_value}"
-        strategy_tag = f"5 BULLISH Ticks (Diff >= {required_diff}) -> HIGHER -{barrier_offset_value}"
+        barrier_to_use = f"+{barrier_offset_value}"
+        strategy_tag = f"5 BULLISH Ticks (Diff >= {required_diff}) -> HIGHER +{barrier_offset_value}"
 
     # ⬇️ إذا كان الاتجاه هابطاً وفرق السعر ≥ 0.5
     elif price_difference < 0 and absolute_diff >= required_diff:
         contract_type_to_use = CONTRACT_TYPE_LOWER
-        barrier_to_use = f"+{barrier_offset_value}"
-        strategy_tag = f"5 BEARISH Ticks (Diff >= {required_diff}) -> LOWER +{barrier_offset_value}"
+        barrier_to_use = f"-{barrier_offset_value}"
+        strategy_tag = f"5 BEARISH Ticks (Diff >= {required_diff}) -> LOWER -{barrier_offset_value}"
 
     else:
         print(f"⚠ [ENTRY SKIPPED] Momentum not strong enough ({absolute_diff:.5f} < {required_diff}). Closing connection immediately.")
