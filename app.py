@@ -21,7 +21,7 @@ DURATION_UNIT = "t"
 
 # إعدادات المضاعفة والتحليل
 TICK_SAMPLE_SIZE = 5 
-MAX_CONSECUTIVE_LOSSES = 2    
+MAX_CONSECUTIVE_LOSSES = 1    
 MARTINGALE_MULTIPLIER = 14.0 # ⬅️ تم التعديل: معامل المضاعفة 19.0
 
 # الثواني المحددة للدخول (تطبق على جميع الصفقات)
