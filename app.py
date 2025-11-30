@@ -22,8 +22,8 @@ USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
 # 💡 COMPOUND ENTRY CRITERIA
-ENTRY_SECONDS = [0, 10, 20, 30, 40, 50] # 💡 الثواني المطلوبة (الشرط الأول)
-ENTRY_DIGIT = 9                # 💡 الرقم الأخير المطلوب (الشرط الثاني)
+ENTRY_SECONDS = [0, 10, 20, 30, 40, 50] 
+ENTRY_DIGIT = 7                
 BASE_CONTRACT_TYPE = "DIGITDIFF" 
 BASE_BARRIER = 7               
 MARTINGALE_BARRIER = 7         
@@ -226,7 +226,8 @@ def check_pnl_limits(email, profit_loss, last_action_type, ws_app):
         current_data['last_trade_barrier'] = MARTINGALE_BARRIER
         save_session_data(email, current_data)
         
-        print(f"💸 [MARTINGALE] Lost. Next stake calculated: {new_stake:.2f}. Waiting for next entry...")
+        # 💡 تم تحديث الرسالة لتعكس الانتظار لفرصة الدخول القادمة
+        print(f"💸 [MARTINGALE] Lost. Next stake calculated: {new_stake:.2f}. Waiting for next **COMPOUND ENTRY**...")
 
     if current_data['current_profit'] >= current_data['tp_target']:
         stop_bot(email, clear_data=True, stop_reason="TP Reached")
@@ -313,25 +314,25 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             if current_data['last_entry_time'] == current_tick_timestamp: 
                 return
             
-            # 4. Check Entry Condition (Compound Logic)
+            # 4. Check Entry Condition (Delayed Martingale Logic)
             
             now_utc = datetime.now(timezone.utc)
             current_second = now_utc.second 
             
-            is_martingale_retry = current_data['current_step'] > 0
+            is_martingale_active = current_data['current_step'] > 0
             is_valid_entry_time = current_second in ENTRY_SECONDS
             is_valid_entry_digit = last_digit == ENTRY_DIGIT
             
-            # 💡 COMPOUND ENTRY LOGIC: Proceed if Martingale Retry OR (Valid Time AND Valid Digit)
-            if not (is_martingale_retry or (is_valid_entry_time and is_valid_entry_digit)):
+            # 💡 NEW DELAYED MARTINGALE LOGIC: الصفقة الأساسية والمضاعفة تتطلبان تحقق الشرطين معاً
+            if not (is_valid_entry_time and is_valid_entry_digit):
                 return 
 
-            # 5. Determine Stake/Barrier
-            if is_martingale_retry:
+            # 5. Determine Stake/Barrier (The signal is met, now check if it's a base or martingale trade)
+            if is_martingale_active:
                 barrier_value = MARTINGALE_BARRIER
                 action_type_to_use = BASE_CONTRACT_TYPE
-                entry_log = f"💡 [MARTINGALE] Last Digit {last_digit} / Immediate Retry (Lost). Using barrier: {barrier_value}"
-                entry_mode = "Instant Martingale"
+                entry_log = f"💡 [MARTINGALE DELAYED] Signal met (Time: :{current_second}, Digit: {last_digit}). Retrying step {current_data['current_step']}. Using barrier: {barrier_value}"
+                entry_mode = "Delayed Martingale Retry"
             else:
                 barrier_value = BASE_BARRIER
                 action_type_to_use = BASE_CONTRACT_TYPE
@@ -533,6 +534,7 @@ CONTROL_FORM = """
     <p class="status-running">✅ Bot is Running! (Strategy: {{ strategy_short }})</p>
     <p style="color:green; font-weight: bold;">⏱️ Entry Seconds: {{ entry_seconds_str }}</p>
     <p style="color:green; font-weight: bold;">🔢 Entry Digit: {{ entry_digit }}</p>
+    <p style="color:red; font-weight: bold;">⚠️ Martingale: Delayed (Awaits next compound signal)</p>
     <p style="color:blue;">💡 Cooldown Time: {{ trade_cooldown_seconds }} seconds after sale.</p>
     <p style="color:red;">💡 Auto-Reconnect Delay: {{ reconnect_delay }} second.</p>
     
@@ -693,7 +695,7 @@ def start_bot():
     with PROCESS_LOCK: active_processes[email] = process
     
     entry_seconds_str = ", ".join(map(str, ENTRY_SECONDS))
-    flash(f'Bot started successfully. Strategy: DIFF {BASE_BARRIER} on Secs ({entry_seconds_str}) AND Digit {ENTRY_DIGIT} (x{MARTINGALE_MULTIPLIER} Persistent Connection)', 'success')
+    flash(f'Bot started successfully. Strategy: DIFF {BASE_BARRIER} on Secs ({entry_seconds_str}) AND Digit {ENTRY_DIGIT} (Martingale Delayed | x{MARTINGALE_MULTIPLIER} Persistent Connection)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
