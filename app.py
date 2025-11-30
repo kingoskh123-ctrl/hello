@@ -14,8 +14,8 @@ WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
 DURATION = 1               
 DURATION_UNIT = "t"        
-MARTINGALE_STEPS = 1       
-MAX_CONSECUTIVE_LOSSES = 2 
+MARTINGALE_STEPS = 2       
+MAX_CONSECUTIVE_LOSSES = 3 
 RECONNECT_DELAY = 1        
 TRADE_COOLDOWN_SECONDS = 2 
 USER_IDS_FILE = "user_ids.txt"
@@ -24,10 +24,10 @@ ACTIVE_SESSIONS_FILE = "active_sessions.json"
 # 💡 COMPOUND ENTRY CRITERIA
 ENTRY_SECONDS = [0, 10, 20, 30, 40, 50] 
 ENTRY_DIGIT = 7                
-BASE_CONTRACT_TYPE = "DIGITDIFF" 
-BASE_BARRIER = 7               
-MARTINGALE_BARRIER = 7         
-MARTINGALE_MULTIPLIER = 14.0 
+BASE_CONTRACT_TYPE = "DIGITUNDER" 
+BASE_BARRIER = 8               
+MARTINGALE_BARRIER = 8         
+MARTINGALE_MULTIPLIER = 6.0 
 # ==========================================================
 
 # ==========================================================
