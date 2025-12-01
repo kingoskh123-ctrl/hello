@@ -14,20 +14,19 @@ WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
 DURATION = 1               
 DURATION_UNIT = "t"        
-MARTINGALE_STEPS = 2       
-MAX_CONSECUTIVE_LOSSES = 3 
+MARTINGALE_STEPS = 1       
+MAX_CONSECUTIVE_LOSSES = 2 
 RECONNECT_DELAY = 1        
 TRADE_COOLDOWN_SECONDS = 2 
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
-# 💡 COMPOUND ENTRY CRITERIA
-ENTRY_SECONDS = [0, 10, 20, 30, 40, 50] 
-ENTRY_DIGIT = 7                
-BASE_CONTRACT_TYPE = "DIGITUNDER" 
-BASE_BARRIER = 8               
-MARTINGALE_BARRIER = 8         
-MARTINGALE_MULTIPLIER = 6.0 
+# 💡 DYNAMIC ENTRY CRITERIA:
+# Entry Condition: Digit(T1) == Digit(T3)
+# Barrier Value: Barrier = Digit(T1)
+BASE_CONTRACT_TYPE = "DIGITDIFF" 
+# BASE_BARRIER and MARTINGALE_BARRIER are now dynamically set in the logic
+MARTINGALE_MULTIPLIER = 14.0 
 # ==========================================================
 
 # ==========================================================
@@ -59,8 +58,9 @@ DEFAULT_SESSION_STATE = {
     "open_time": 0,              
     "last_action_type": BASE_CONTRACT_TYPE, 
     "last_valid_tick_price": 0.0,
-    "last_trade_barrier": BASE_BARRIER, 
+    "last_trade_barrier": 0, # Reset to 0 (dynamic)
     "last_trade_closed_time": 0,        
+    "last_three_digits": [] 
 }
 # ==========================================================
 
@@ -201,7 +201,7 @@ def check_pnl_limits(email, profit_loss, last_action_type, ws_app):
         current_data['consecutive_losses'] = 0
         current_data['current_stake'] = current_data['base_stake']
         current_data['last_action_type'] = last_action_type
-        current_data['last_trade_barrier'] = BASE_BARRIER
+        current_data['last_trade_barrier'] = current_data.get('last_trade_barrier', 0) # Keep dynamic barrier for log
         save_session_data(email, current_data)
         
         print(f"✅ [WIN] Sold contract. Resetting to base stake. Waiting for next entry...")
@@ -223,11 +223,10 @@ def check_pnl_limits(email, profit_loss, last_action_type, ws_app):
         
         current_data['current_stake'] = new_stake
         current_data['last_action_type'] = last_action_type
-        current_data['last_trade_barrier'] = MARTINGALE_BARRIER
+        current_data['last_trade_barrier'] = current_data.get('last_trade_barrier', 0) # Keep dynamic barrier for log
         save_session_data(email, current_data)
         
-        # 💡 تم تحديث الرسالة لتعكس الانتظار لفرصة الدخول القادمة
-        print(f"💸 [MARTINGALE] Lost. Next stake calculated: {new_stake:.2f}. Waiting for next **COMPOUND ENTRY**...")
+        print(f"💸 [MARTINGALE] Lost. Next stake calculated: {new_stake:.2f}. Waiting for next **DIGIT SEQUENCE ENTRY**...")
 
     if current_data['current_profit'] >= current_data['tp_target']:
         stop_bot(email, clear_data=True, stop_reason="TP Reached")
@@ -239,7 +238,7 @@ def check_pnl_limits(email, profit_loss, last_action_type, ws_app):
 
 def bot_core_logic(email, token, stake, tp, currency, account_type):
     
-    global active_ws, BASE_CONTRACT_TYPE, RECONNECT_DELAY, ENTRY_SECONDS, ENTRY_DIGIT
+    global active_ws, BASE_CONTRACT_TYPE, RECONNECT_DELAY
     
     session_data = get_session_data(email)
     session_data.update({
@@ -260,7 +259,8 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "open_time": 0,              
         "last_action_type": BASE_CONTRACT_TYPE, 
         "last_valid_tick_price": 0.0,
-        "last_trade_barrier": BASE_BARRIER, 
+        "last_trade_barrier": 0, 
+        "last_three_digits": [] 
     })
     save_session_data(email, session_data)
 
@@ -295,10 +295,17 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             
             last_digit = int(str(current_price).split('.')[-1][-1]) 
             
+            # 💡 تحديث قائمة آخر 3 أرقام
+            last_three_digits = current_data.get('last_three_digits', [])
+            last_three_digits.append(last_digit)
+            if len(last_three_digits) > 3:
+                last_three_digits.pop(0)
+                
             # Update state with the latest tick data
             current_data['last_tick_data'] = { "price": current_price, "timestamp": current_tick_timestamp }
             current_data['last_valid_tick_price'] = current_price
             current_data['last_digit'] = last_digit 
+            current_data['last_three_digits'] = last_three_digits
             save_session_data(email, current_data)
             
             # 1. Skip if contract is OPEN
@@ -314,30 +321,32 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             if current_data['last_entry_time'] == current_tick_timestamp: 
                 return
             
-            # 4. Check Entry Condition (Delayed Martingale Logic)
-            
-            now_utc = datetime.now(timezone.utc)
-            current_second = now_utc.second 
+            # 4. Check Entry Condition (Digit Sequence Logic)
             
             is_martingale_active = current_data['current_step'] > 0
-            is_valid_entry_time = current_second in ENTRY_SECONDS
-            is_valid_entry_digit = last_digit == ENTRY_DIGIT
             
-            # 💡 NEW DELAYED MARTINGALE LOGIC: الصفقة الأساسية والمضاعفة تتطلبان تحقق الشرطين معاً
-            if not (is_valid_entry_time and is_valid_entry_digit):
+            # 💡 شرط الدخول: T1 == T3
+            is_entry_condition_met = (
+                len(last_three_digits) == 3 and
+                last_three_digits[0] == last_three_digits[2]
+            )
+
+            # 💡 NEW ENTRY LOGIC
+            if not is_entry_condition_met:
                 return 
 
-            # 5. Determine Stake/Barrier (The signal is met, now check if it's a base or martingale trade)
+            # 5. Determine Stake/Barrier (Condition met, now set the dynamic barrier)
+            
+            # 💡 تحديد الـ Barrier من الرقم المتكرر
+            barrier_value = last_three_digits[0]
+            action_type_to_use = BASE_CONTRACT_TYPE
+            
             if is_martingale_active:
-                barrier_value = MARTINGALE_BARRIER
-                action_type_to_use = BASE_CONTRACT_TYPE
-                entry_log = f"💡 [MARTINGALE DELAYED] Signal met (Time: :{current_second}, Digit: {last_digit}). Retrying step {current_data['current_step']}. Using barrier: {barrier_value}"
+                entry_log = f"💡 [MARTINGALE DELAYED] Signal met (T1={last_three_digits[0]} == T3={last_three_digits[2]}). Retrying step {current_data['current_step']}."
                 entry_mode = "Delayed Martingale Retry"
             else:
-                barrier_value = BASE_BARRIER
-                action_type_to_use = BASE_CONTRACT_TYPE
-                entry_log = f"🎯 [BASE ENTRY] Both conditions met (Time: :{current_second}, Digit: {last_digit}). Barrier set: {barrier_value}"
-                entry_mode = "Compound Base Entry"
+                entry_log = f"🎯 [BASE ENTRY] Signal met (T1={last_three_digits[0]} == T3={last_three_digits[2]})."
+                entry_mode = "Digit Sequence Base Entry"
             
             current_data['last_trade_barrier'] = barrier_value
             save_session_data(email, current_data)
@@ -360,7 +369,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             save_session_data(email, current_data)
             
             print(entry_log)
-            print(f"✅ [ENTRY @ {entry_mode}] Entered {action_type_to_use} with Target Digit: {barrier_value} on price: {current_price}")
+            print(f"✅ [ENTRY @ {entry_mode}] Entered {action_type_to_use} with **Dynamic Barrier: {barrier_value}** on price: {current_price}. Last 3 Digits: {last_three_digits}")
             return 
 
         elif msg_type == 'buy':
@@ -528,13 +537,12 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = base_contract_type + " (Barrier " + base_barrier|string + " | Martingale x" + martingale_multiplier|string + ")" %}
-    {% set entry_seconds_str = ", ".join(entry_seconds|map('string')|list) %}
+    {% set strategy = base_contract_type + " (Dynamic Barrier | Martingale x" + martingale_multiplier|string + ")" %}
 
     <p class="status-running">✅ Bot is Running! (Strategy: {{ strategy_short }})</p>
-    <p style="color:green; font-weight: bold;">⏱️ Entry Seconds: {{ entry_seconds_str }}</p>
-    <p style="color:green; font-weight: bold;">🔢 Entry Digit: {{ entry_digit }}</p>
-    <p style="color:red; font-weight: bold;">⚠️ Martingale: Delayed (Awaits next compound signal)</p>
+    <p style="color:blue; font-weight: bold;">📊 Entry Condition: **Digit(T1) MUST EQUAL Digit(T3)**</p>
+    <p style="color:blue; font-weight: bold;">🎯 Barrier: **DYNAMIC** (Set to T1/T3 Digit)</p>
+    <p style="color:red; font-weight: bold;">⚠️ Martingale: Delayed (Awaits next T1=T3 signal)</p>
     <p style="color:blue;">💡 Cooldown Time: {{ trade_cooldown_seconds }} seconds after sale.</p>
     <p style="color:red;">💡 Auto-Reconnect Delay: {{ reconnect_delay }} second.</p>
     
@@ -551,8 +559,9 @@ CONTROL_FORM = """
     <p>Step: {{ session_data.current_step }} / {{ martingale_steps }} (Max Consecutive Losses: {{ max_consecutive_losses }})</p>
     <p>Stats: {{ session_data.total_wins }} Wins | {{ session_data.total_losses }} Losses</p>
     <p style="font-weight: bold; color: purple;">Last Tick Price: {{ session_data.last_valid_tick_price|round(5) }} (Last Digit: {{ session_data.last_digit if 'last_digit' in session_data else 'N/A' }})</p>
+    <p style="font-weight: bold; color: #007bff;">Last 3 Digits: [T1, T2, T3] = {{ session_data.last_three_digits|join(', ') if session_data.last_three_digits else 'N/A' }}</p>
     {% if session_data.last_trade_barrier is not none %}
-        <p style="font-weight: bold; color: blue;">Target Barrier Used: {{ session_data.last_trade_barrier }}</p>
+        <p style="font-weight: bold; color: blue;">Target Barrier Used (Dynamic): {{ session_data.last_trade_barrier }}</p>
     {% endif %}
     <p style="font-weight: bold; color: #007bff;">Current Strategy: {{ strategy }}</p>
     
@@ -636,15 +645,11 @@ def index():
         martingale_steps=MARTINGALE_STEPS,
         max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
         base_contract_type=BASE_CONTRACT_TYPE, 
-        base_barrier=BASE_BARRIER,
-        martingale_barrier=MARTINGALE_BARRIER,
         martingale_multiplier=MARTINGALE_MULTIPLIER,
         duration=DURATION,
         trade_cooldown_seconds=TRADE_COOLDOWN_SECONDS,
         reconnect_delay=RECONNECT_DELAY,
-        entry_seconds=ENTRY_SECONDS, 
-        entry_digit=ENTRY_DIGIT,
-        strategy_short=f"DIFF {BASE_BARRIER} on Secs & Digit {ENTRY_DIGIT}"
+        strategy_short=f"DIFF Dynamic Barrier (T1=T3 Digit Match)"
     )
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -668,7 +673,7 @@ def auth_page():
 
 @app.route('/start', methods=['POST'])
 def start_bot():
-    global active_processes, BASE_CONTRACT_TYPE, MARTINGALE_MULTIPLIER, ENTRY_SECONDS, ENTRY_DIGIT
+    global active_processes, BASE_CONTRACT_TYPE, MARTINGALE_MULTIPLIER
     if 'email' not in session: return redirect(url_for('auth_page'))
     email = session['email']
     
@@ -694,8 +699,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    entry_seconds_str = ", ".join(map(str, ENTRY_SECONDS))
-    flash(f'Bot started successfully. Strategy: DIFF {BASE_BARRIER} on Secs ({entry_seconds_str}) AND Digit {ENTRY_DIGIT} (Martingale Delayed | x{MARTINGALE_MULTIPLIER} Persistent Connection)', 'success')
+    flash(f'Bot started successfully. Strategy: DIFF Dynamic Barrier on T1=T3 Digit Match (Martingale Delayed | x{MARTINGALE_MULTIPLIER} Persistent Connection)', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
