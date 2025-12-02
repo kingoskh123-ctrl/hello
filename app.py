@@ -15,17 +15,17 @@ WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
 DURATION = 5               # Contract duration is 5 Ticks
 DURATION_UNIT = "t"        
-MARTINGALE_STEPS = 3        
-MAX_CONSECUTIVE_LOSSES = 4  
+MARTINGALE_STEPS = 4        
+MAX_CONSECUTIVE_LOSSES = 5  
 RECONNECT_DELAY = 1        
 TRADE_COOLDOWN_SECONDS = 2  
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
 # 💡 CONTRACT AND STRATEGY SETTINGS
-CONTRACT_TYPE_ONETOUCH = "NOTOUCH" # 💡 CORRECTED: Single ONETOUCH contract
+CONTRACT_TYPE_ONETOUCH = "ONETOUCH" # 💡 CORRECTED: Single ONETOUCH contract
 BARRIER_OFFSET = "0.2"             
-MARTINGALE_MULTIPLIER = 3.0 
+MARTINGALE_MULTIPLIER = 2.0 
 TOTAL_CONTRACTS_PER_TRADE = 1      # Only one contract per trade cycle
 TICK_ANALYSIS_COUNT = 10           # Number of ticks to analyze for trend
 ENTRY_SECOND = 0                   # Entry time is 0 second of the minute
