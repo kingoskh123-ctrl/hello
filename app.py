@@ -15,20 +15,20 @@ WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
 DURATION = 5               # Contract duration is 5 Ticks
 DURATION_UNIT = "t"        
-MARTINGALE_STEPS = 3        
-MAX_CONSECUTIVE_LOSSES = 4  
+MARTINGALE_STEPS = 1        # 💡 NEW: Max Martingale Steps = 1 (Base + 1 Martingale)
+MAX_CONSECUTIVE_LOSSES = 2  # 💡 NEW: Stop after 2 consecutive losses (Base loss + 1 Martingale loss)
 RECONNECT_DELAY = 1        
-TRADE_COOLDOWN_SECONDS = 2  
+TRADE_COOLDOWN_SECONDS = 2  # Cooldown after trade closure
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
-# 💡 CONTRACT AND STRATEGY SETTINGS
-CONTRACT_TYPE_ONETOUCH = "ONETOUCH" # 💡 CORRECTED: Single ONETOUCH contract
-BARRIER_OFFSET = "0.1"             
-MARTINGALE_MULTIPLIER = 2.0 
-TOTAL_CONTRACTS_PER_TRADE = 1      # Only one contract per trade cycle
-TICK_ANALYSIS_COUNT = 5           # Number of ticks to analyze for trend
-ENTRY_SECOND = 0                   # Entry time is 0 second of the minute
+# 💡 SIMULTANEOUS TOUCH CONTRACTS (Continuous Trading)
+BASE_CONTRACT_TYPE_1 = "ONETOUCH" 
+BARRIER_OFFSET_1 = "+0.2"       # 💡 NEW: Positive Barrier +0.2
+BASE_CONTRACT_TYPE_2 = "ONETOUCH" 
+BARRIER_OFFSET_2 = "-0.2"       # 💡 NEW: Negative Barrier -0.2
+TOTAL_CONTRACTS_PER_TRADE = 2    # Two contracts per trade cycle
+MARTINGALE_MULTIPLIER = 14.0     # 💡 NEW: Martingale Multiplier x14 (High risk)
 # ==========================================================
 
 # ==========================================================
@@ -59,15 +59,16 @@ DEFAULT_SESSION_STATE = {
     "open_contract_ids": [],    
     "open_prices": [],          
     "open_time": 0,              
+    "last_action_type": BASE_CONTRACT_TYPE_1,
     
-    "closed_contracts_pnl": 0.0, 
+    "closed_contracts_pnl": 0.0, # Net PNL for the entire cycle (both contracts)
     "closed_contracts_count": 0, 
     
     "last_valid_tick_price": 0.0,
     "last_trade_closed_time": 0,        
     
-    "tick_history": deque(maxlen=TICK_ANALYSIS_COUNT), 
-    "is_in_trade": False                               
+    "tick_history": deque(maxlen=10), # Not used for this strategy
+    "is_in_trade": False # Flag to prevent entry during a running cycle
 }
 # ==========================================================
 
@@ -84,13 +85,12 @@ def load_persistent_sessions():
 
 def save_session_data(email, session_data):
     all_sessions = load_persistent_sessions()
-    # Handle deque before saving
     session_data['tick_history'] = list(session_data['tick_history'])
     all_sessions[email] = session_data
     with open(ACTIVE_SESSIONS_FILE, 'w') as f:
         try: json.dump(all_sessions, f, indent=4)
         except: pass
-    session_data['tick_history'] = deque(session_data['tick_history'], maxlen=TICK_ANALYSIS_COUNT)
+    session_data['tick_history'] = deque(session_data['tick_history'], maxlen=10)
 
 
 def get_session_data(email):
@@ -99,8 +99,7 @@ def get_session_data(email):
         data = all_sessions[email]
         for key, default_val in DEFAULT_SESSION_STATE.items():
             if key not in data: data[key] = default_val
-        # Restore deque
-        data['tick_history'] = deque(data['tick_history'], maxlen=TICK_ANALYSIS_COUNT)
+        data['tick_history'] = deque(data['tick_history'], maxlen=10)
         return data
     return DEFAULT_SESSION_STATE.copy()
 
@@ -166,11 +165,12 @@ def calculate_martingale_stake(base_stake, current_stake, current_step):
     if current_step == 0:
         return base_stake
     if current_step <= MARTINGALE_STEPS:
+        # Stake * Multiplier (Martingale)
         return current_stake * MARTINGALE_MULTIPLIER
     return base_stake
 
-def send_trade_order(email, stake, currency, contract_type_param, barrier_offset_sign):
-    global active_ws, DURATION, DURATION_UNIT, SYMBOL, BARRIER_OFFSET, CONTRACT_TYPE_ONETOUCH
+def send_trade_order(email, stake, currency, contract_type_param, barrier_offset):
+    global active_ws, DURATION, DURATION_UNIT, SYMBOL
     
     if email not in active_ws or active_ws[email] is None: return
     ws_app = active_ws[email]
@@ -181,76 +181,53 @@ def send_trade_order(email, stake, currency, contract_type_param, barrier_offset
         "parameters": {
             "amount": round(stake, 2),
             "basis": "stake",
-            "contract_type": CONTRACT_TYPE_ONETOUCH, # Always ONETOUCH
+            "contract_type": contract_type_param,  
             "currency": currency,  
             "duration": DURATION,
             "duration_unit": DURATION_UNIT, 
             "symbol": SYMBOL,
-            "barrier": f"{barrier_offset_sign}{BARRIER_OFFSET}" # e.g. +0.2 or -0.2
+            "barrier": barrier_offset # e.g. +0.2 or -0.2
         }
     }
     
     try:
         ws_app.send(json.dumps(trade_request))
-        trade_barrier = trade_request['parameters'].get('barrier')
-        print(f"💰 [TRADE] Sent {CONTRACT_TYPE_ONETOUCH} | Barrier: {trade_barrier} | Stake: {round(stake, 2):.2f} {currency}")
-        # Set trade flag immediately after sending
+        print(f"💰 [TRADE] Sent {contract_type_param} | Barrier: {barrier_offset} | Stake: {round(stake, 2):.2f} {currency}")
+        # Set trade flag immediately after sending the first contract
         current_data = get_session_data(email)
         current_data["is_in_trade"] = True
         save_session_data(email, current_data)
-        
     except Exception as e:
         print(f"❌ [TRADE ERROR] Could not send trade order: {e}")
         pass
-
-def analyze_trend(tick_history):
-    """
-    Analyzes the last 10 ticks to determine the trend (Uptrend/Downtrend).
-    Returns '+' for uptrend, '-' for downtrend, or None for neutral/insufficient data.
-    """
-    if len(tick_history) < TICK_ANALYSIS_COUNT:
-        return None 
+        
+def start_new_trade(email, current_data):
+    """Initiates the two simultaneous Touch contracts."""
+    global BASE_CONTRACT_TYPE_1, BARRIER_OFFSET_1, BASE_CONTRACT_TYPE_2, BARRIER_OFFSET_2
     
-    up_ticks = 0
-    down_ticks = 0
-    
-    # Iterate through the history and compare each tick with the previous one
-    for i in range(1, len(tick_history)):
-        if tick_history[i] > tick_history[i-1]:
-            up_ticks += 1
-        elif tick_history[i] < tick_history[i-1]:
-            down_ticks += 1
-            
-    if up_ticks > down_ticks:
-        return "+" # Uptrend -> Positive Barrier +0.2
-    elif down_ticks > up_ticks:
-        return "-" # Downtrend -> Negative Barrier -0.2
-    else:
-        return None # Neutral or equal movements
-
-
-def start_new_trade(email, current_data, trend_sign):
-    """Initiates a single ONETOUCH contract based on the trend analysis."""
-    
+    # 💡 يتم استخدام الرهان الحالي لكل صفقة بشكل منفصل (Double Stake Mode)
     stake_to_use = current_data['current_stake']
     currency_to_use = current_data['currency']
     
-    if not trend_sign:
-        print("⚠️ [ENTRY SKIPPED] Trend is neutral or not enough ticks. Waiting for next entry window.")
-        current_data["is_in_trade"] = False
-        save_session_data(email, current_data)
-        return
-
-    # Send single ONETOUCH contract with the appropriate barrier sign
+    # Contract 1: ONETOUCH +0.2
     send_trade_order(
         email, 
         stake_to_use, 
         currency_to_use, 
-        CONTRACT_TYPE_ONETOUCH, 
-        trend_sign # '+' or '-'
+        BASE_CONTRACT_TYPE_1, 
+        BARRIER_OFFSET_1
+    )
+    
+    # Contract 2: ONETOUCH -0.2
+    send_trade_order(
+        email, 
+        stake_to_use, 
+        currency_to_use, 
+        BASE_CONTRACT_TYPE_2, 
+        BARRIER_OFFSET_2
     )
 
-    # Update state for the new trade cycle
+    # Reset PNL tracking for the new trade cycle
     current_data['last_entry_time'] = int(time.time())
     current_data['last_entry_price'] = current_data['last_valid_tick_price']
     current_data["closed_contracts_pnl"] = 0.0
@@ -259,15 +236,14 @@ def start_new_trade(email, current_data, trend_sign):
     
     save_session_data(email, current_data)
     
-    entry_mode = f"Martingale Step {current_data['current_step']}" if current_data['current_step'] > 0 else "Base Entry"
-    print(f"✅ [ENTRY @ {entry_mode}] Sent single ONETOUCH contract. Stake: {stake_to_use:.2f}")
-
+    entry_mode = f"Martingale Step {current_data['current_step']}" if current_data['current_step'] > 0 else "Continuous Base Entry"
+    print(f"✅ [ENTRY @ {entry_mode}] Sent two Touch contracts (Barrier {BARRIER_OFFSET_1} and {BARRIER_OFFSET_2}). Each Stake: {stake_to_use:.2f}")
 
 def check_pnl_limits(email, contract_id, contract_profit):
     global TOTAL_CONTRACTS_PER_TRADE, MARTINGALE_STEPS, MAX_CONSECUTIVE_LOSSES
     current_data = get_session_data(email)
     
-    # 1. Update the PNL for this contract (Single contract trade: closed_contracts_count will be 1)
+    # 1. Update the PNL for this contract
     current_data["closed_contracts_pnl"] += contract_profit
     current_data["closed_contracts_count"] += 1
     
@@ -275,14 +251,14 @@ def check_pnl_limits(email, contract_id, contract_profit):
     if contract_id in current_data["open_contract_ids"]:
         current_data["open_contract_ids"].remove(contract_id)
         
-    current_data["is_in_trade"] = False # Trade is closed
     save_session_data(email, current_data)
 
-    # 2. Check if all contracts for this trade cycle are closed (Always true since TOTAL_CONTRACTS_PER_TRADE = 1)
+    # 2. Check if all contracts for this trade cycle are closed
     if current_data["closed_contracts_count"] < TOTAL_CONTRACTS_PER_TRADE:
-        return 
+        print(f"⌛ [PNL CHECK] Contract {contract_id} closed. Waiting for the remaining {TOTAL_CONTRACTS_PER_TRADE - current_data['closed_contracts_count']} contract(s)...")
+        return
         
-    # --- Contract closed, now evaluate the outcome ---
+    # --- All contracts closed, now evaluate the whole trade cycle ---
     
     total_profit_loss = current_data["closed_contracts_pnl"]
     last_stake = current_data['current_stake']
@@ -293,6 +269,7 @@ def check_pnl_limits(email, contract_id, contract_profit):
     current_data["closed_contracts_count"] = 0
     current_data["open_contract_ids"] = []
     current_data["last_trade_closed_time"] = int(time.time())
+    current_data["is_in_trade"] = False # Cycle completed
     
     if not current_data.get('is_running'): 
         save_session_data(email, current_data)
@@ -305,10 +282,10 @@ def check_pnl_limits(email, contract_id, contract_profit):
         current_data['current_stake'] = current_data['base_stake']
         save_session_data(email, current_data)
         
-        print(f"✅ [WIN] Contract closed (PNL: {total_profit_loss:.2f}). Resetting to base stake.")
+        print(f"✅ [WIN CYCLE] Both contracts closed (Total PNL: {total_profit_loss:.2f}). Resetting to base stake.")
         
     else:
-        # Loss occurred, apply Martingale
+        # Loss cycle (Net PNL <= 0)
         current_data['total_losses'] += 1
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1
@@ -327,9 +304,10 @@ def check_pnl_limits(email, contract_id, contract_profit):
         current_data['current_stake'] = new_stake
         save_session_data(email, current_data)
         
-        print(f"💸 [MARTINGALE] Lost trade (PNL: {total_profit_loss:.2f}). Next stake calculated: {new_stake:.2f}.")
+        # ⚠️ تنبيه: المضاعف x14 كبير جداً وسيزيد المخاطر بسرعة فائقة.
+        print(f"💸 [MARTINGALE] Lost cycle (Total PNL: {total_profit_loss:.2f}). Next stake calculated (x14): {new_stake:.2f}.")
 
-    # Check Take Profit condition
+    # 💡 Check Take Profit condition
     if current_data['current_profit'] >= current_data['tp_target']:
         stop_bot(email, clear_data=True, stop_reason="TP Reached")
         return
@@ -337,7 +315,7 @@ def check_pnl_limits(email, contract_id, contract_profit):
     currency = current_data.get('currency', 'USD')
     print(f"[LOG {email}] PNL: {currency} {current_data['current_profit']:.2f}, Step: {current_data['current_step']}.")
     
-    # The next trade will be initiated by the 'tick' message when the time hits ENTRY_SECOND
+    # 3. Next trade will be initiated by the 'tick' message after cooldown.
 
 
 def bot_core_logic(email, token, stake, tp, currency, account_type):
@@ -364,7 +342,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "closed_contracts_pnl": 0.0,
         "closed_contracts_count": 0,
         "last_valid_tick_price": 0.0,
-        "tick_history": deque(maxlen=TICK_ANALYSIS_COUNT), 
+        "tick_history": deque(maxlen=10), 
         "is_in_trade": False
     })
     save_session_data(email, session_data)
@@ -384,10 +362,13 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         running_data['stop_reason'] = "Running"
         save_session_data(email, running_data)
         print(f"✅ [PROCESS] Connection established for {email}.")
+        
+        # Start the first trade immediately on open if not already in a trade
+        if not running_data.get('open_contract_ids') and not running_data.get('is_in_trade'):
+            start_new_trade(email, running_data)
 
 
     def on_message_wrapper(ws_app, message):
-        global ENTRY_SECOND
         data = json.loads(message)
         msg_type = data.get('msg_type')
         
@@ -398,28 +379,22 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             
         if msg_type == 'tick':
             current_price = float(data['tick']['quote'])
-            current_epoch_time = int(data['tick']['epoch'])
-            current_second = datetime.fromtimestamp(current_epoch_time, tz=timezone.utc).second
-            
-            # 1. Update Tick History
-            current_data['tick_history'].append(current_price)
             current_data['last_valid_tick_price'] = current_price
             save_session_data(email, current_data)
             
-            # 2. Check Entry Condition (Second 0 and not currently in a trade)
-            if current_second == ENTRY_SECOND and not current_data.get('is_in_trade'):
-                
-                # Analyze Trend
-                trend_sign = analyze_trend(current_data['tick_history'])
-                
-                if trend_sign:
-                    print(f"🔬 [TREND ANALYSIS] Last {TICK_ANALYSIS_COUNT} ticks trend: {trend_sign}")
-                    start_new_trade(email, current_data, trend_sign)
-                else:
-                    print(f"⚠️ [ENTRY SKIPPED] Trend is neutral or not enough ticks ({len(current_data['tick_history'])}/{TICK_ANALYSIS_COUNT}).")
+            # 1. Skip if contracts are OPEN or waiting for cooldown
+            if current_data.get('is_in_trade'): 
+                return
+            
+            # 2. Check Trade Cooldown and initiate next trade (Continuous Trading)
+            now_epoch = int(time.time())
+            if now_epoch >= current_data.get('last_trade_closed_time', 0) + TRADE_COOLDOWN_SECONDS:
+                 if not current_data.get('open_contract_ids') and not current_data.get('is_in_trade'):
+                    start_new_trade(email, current_data)
 
 
         elif msg_type == 'buy':
+            # This handles the buy response for BOTH contracts
             contract_id = data['buy']['contract_id']
             open_price = data['buy'].get('buy_price', 0.0)
             
@@ -589,15 +564,15 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = contract_type_onetouch + " (5 Ticks Barrier $\pm" + barrier_offset + "$)" %}
+    {% set strategy = base_contract_type_1 + "/" + base_contract_type_2 + " (Simultaneous $\pm" + barrier_offset_1|replace("+", "") + "$ | Martingale x" + martingale_multiplier|string + ")" %}
 
     <p class="status-running">✅ Bot is Running! (Strategy: {{ strategy_short }})</p>
-    <p style="color:blue; font-weight: bold;">📊 Entry Condition: **Second 0** of the minute</p>
-    <p style="color:blue; font-weight: bold;">🔬 Analysis: **10 Ticks Trend** (Up $\rightarrow +0.2$, Down $\rightarrow -0.2$)</p>
-    <p style="color:blue; font-weight: bold;">🎯 Contract: **Single ONETOUCH 5 Ticks Barrier $\pm 0.2$**</p>
+    <p style="color:red; font-weight: bold;">⚠️ **Double Stake Mode:** Base Stake used for EACH contract (Total Risk = Base Stake x 2).</p>
+    <p style="color:blue; font-weight: bold;">📊 Entry Condition: **Continuous Trading** (After Cooldown)</p>
+    <p style="color:blue; font-weight: bold;">🎯 Contracts: **Touch $+0.2$ AND Touch $-0.2$** (Simultaneous 5 Ticks)</p>
     <p style="color:red; font-weight: bold;">⚠️ Martingale Multiplier: **x{{ martingale_multiplier|round(1) }}**</p>
     <p style="color:red; font-weight: bold;">⚠️ Max Consecutive Losses: **{{ max_consecutive_losses }}** (Max Steps: {{ martingale_steps }})</p>
-    <p style="color:blue;">💡 Ticks History: {{ session_data.tick_history|length }} / {{ tick_analysis_count }}</p>
+    <p style="color:blue;">💡 Cooldown Time: {{ trade_cooldown_seconds }} seconds after cycle closure.</p>
     <p style="color:red;">💡 Auto-Reconnect Delay: {{ reconnect_delay }} second.</p>
     
     {% if session_data.open_contract_ids %}
@@ -609,7 +584,7 @@ CONTROL_FORM = """
 
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
     <p>Net Profit: {{ session_data.currency }} {{ session_data.current_profit|round(2) }}</p>
-    <p>Current Stake: {{ session_data.currency }} {{ session_data.current_stake|round(2) }}</p>
+    <p>Current Stake (Per Contract): {{ session_data.currency }} {{ session_data.current_stake|round(2) }}</p>
     <p>Step: {{ session_data.current_step }} / {{ martingale_steps }} (Max Consecutive Losses: {{ max_consecutive_losses }})</p>
     <p>Stats: {{ session_data.total_wins }} Wins | {{ session_data.total_losses }} Losses</p>
     <p style="font-weight: bold; color: purple;">Last Tick Price: {{ session_data.last_valid_tick_price|round(5) }}</p>
@@ -694,15 +669,16 @@ def index():
         session_data=session_data,
         martingale_steps=MARTINGALE_STEPS,
         max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
-        contract_type_onetouch=CONTRACT_TYPE_ONETOUCH,
-        barrier_offset=BARRIER_OFFSET,
+        base_contract_type_1=BASE_CONTRACT_TYPE_1,
+        base_contract_type_2=BASE_CONTRACT_TYPE_2,
+        barrier_offset_1=BARRIER_OFFSET_1,
+        barrier_offset_2=BARRIER_OFFSET_2,
         total_contracts_per_trade=TOTAL_CONTRACTS_PER_TRADE,
         martingale_multiplier=MARTINGALE_MULTIPLIER,
         duration=DURATION,
-        tick_analysis_count=TICK_ANALYSIS_COUNT,
         trade_cooldown_seconds=TRADE_COOLDOWN_SECONDS,
         reconnect_delay=RECONNECT_DELAY,
-        strategy_short=f"ONETOUCH 5 Ticks $\\pm{BARRIER_OFFSET}$ (Trend Analysis)"
+        strategy_short=f"Touch/Touch 5 Ticks $\\pm{BARRIER_OFFSET_1.replace('+', '')}$ (Continuous | x14 Martingale)"
     )
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -752,7 +728,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    flash(f'Bot started successfully. Strategy: ONETOUCH {DURATION} Ticks (Barrier +/- {BARRIER_OFFSET}) based on {TICK_ANALYSIS_COUNT} Ticks Trend. Martingale (x{MARTINGALE_MULTIPLIER}).', 'success')
+    flash(f'Bot started successfully. Strategy: Touch/Touch {DURATION} Ticks (Barrier +/- {BARRIER_OFFSET_1.replace("+", "")}) Continuous Trading. Martingale (x{MARTINGALE_MULTIPLIER}).', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
