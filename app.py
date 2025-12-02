@@ -23,7 +23,7 @@ USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
 # 💡 CONTRACT AND STRATEGY SETTINGS
-CONTRACT_TYPE_ONETOUCH = "ONETOUCH" # 💡 CORRECTED: Single ONETOUCH contract
+CONTRACT_TYPE_ONETOUCH = "NOTOUCH" # 💡 CORRECTED: Single ONETOUCH contract
 BARRIER_OFFSET = "0.2"             
 MARTINGALE_MULTIPLIER = 3.0 
 TOTAL_CONTRACTS_PER_TRADE = 1      # Only one contract per trade cycle
