@@ -408,7 +408,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         if current_data['consecutive_losses'] == 0: 
                             # 💡 تم تغيير شرط الدخول إلى الرقم الأخير = 4
                             if T1 == 4:
-                                print(f"📊 [ENTRY CONDITION MET] Last Digit = 4. Entering Double Trade.")
+                                print(f"📊 [ENTRY CONDITION MET] Last Digit = 1. Entering Double Trade.")
                                 start_new_double_trade(email, force_entry=False)
                                 current_data = get_session_data(email) 
                             
