@@ -9,92 +9,77 @@ from threading import Lock
 from collections import deque
 
 # ==========================================================
-# BOT CONSTANT SETTINGS 
+# BOT CONSTANT SETTINGS (UPDATED RISK)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
 DURATION_UNIT = "t"        
 RECONNECT_DELAY = 1        
-USER_IDS_FILE = "user_ids.txt"
-ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
 # 💡 STRATEGY SPECIFIC CONSTANTS
-CONTRACT_TYPE_1 = "DIGITOVER"       # الصفقة الأولى: Over
+CONTRACT_TYPE_1 = "DIGITOVER"       
 DURATION_1 = 1                      
-BARRIER_1 = "5"                     # الخانة المتوقعة > 5
+BARRIER_1 = "5"                     
 
-CONTRACT_TYPE_2 = "DIGITUNDER"      # الصفقة الثانية: Under
+CONTRACT_TYPE_2 = "DIGITUNDER"      
 DURATION_2 = 1                      
-BARRIER_2 = "4"                     # الخانة المتوقعة < 4
+BARRIER_2 = "4"                     
 
 TOTAL_CONTRACTS_PER_TRADE = 2       
 
-# 🚨 RISK SETTINGS 
-MARTINGALE_MULTIPLIER = 6.0        
-MARTINGALE_STEPS = 2                
-MAX_CONSECUTIVE_LOSSES = 3          
+# 🚨 RISK SETTINGS (UPDATED)
+MARTINGALE_MULTIPLIER = 6.0         # 💡 UPDATED: المضاعفة x6.0
+MARTINGALE_STEPS = 2                # 💡 UPDATED: الحد الأقصى للخطوات 2 (مما يعني 3 صفقات كحد أقصى)
+MAX_CONSECUTIVE_LOSSES = 3          # 💡 UPDATED: الحد الأقصى للخسارة المتتالية 3
 
 # Entry Condition
-ENTRY_LAST_DIGIT = '5' # 💡 شرط الدخول: الخانة الأخيرة = 5
+ENTRY_LAST_DIGIT = '5' 
 # ==========================================================
 
 # ==========================================================
-# GLOBAL STATE (Shared between processes via File/Lock)
+# GLOBAL STATE (Simplified: Using Flask Session/Process management only)
 # ==========================================================
 active_processes = {}
 active_ws = {}
 PROCESS_LOCK = Lock()
+# 🛑 Removed file management (user_ids.txt, active_sessions.json)
 
 DEFAULT_SESSION_STATE = {
     "api_token": "", "base_stake": 1.0, "tp_target": 10.0, "is_running": False, "current_profit": 0.0, "current_stake": 1.0, 
     "consecutive_losses": 0, "current_step": 0, "total_wins": 0, "total_losses": 0, "stop_reason": "Stopped Manually",
-    "last_entry_time": 0, "last_entry_price": 0.0, "last_tick_data": None, "currency": "USD", "account_type": "demo",
+    "last_entry_time": 0, "last_entry_price": 0.0, "currency": "USD", "account_type": "demo",
     "open_contract_ids": [], "open_prices": [], "open_time": 0, "closed_contracts_pnl": 0.0, "closed_contracts_count": 0, 
-    "last_valid_tick_price": 0.0, "last_trade_closed_time": 0, "tick_history": deque(maxlen=3), "is_in_trade": False 
+    "last_valid_tick_price": 0.0, "last_trade_closed_time": 0, "tick_history": [], "is_in_trade": False 
 }
 
-# (Data Management functions - load/save/get/delete session_data, load_allowed_users, stop_bot - UNCHANGED)
-def load_persistent_sessions():
-    if not os.path.exists(ACTIVE_SESSIONS_FILE): return {}
-    try:
-        with open(ACTIVE_SESSIONS_FILE, 'r') as f:
-            content = f.read()
-            return json.loads(content) if content else {}
-    except: return {}
-
-def save_session_data(email, session_data):
-    all_sessions = load_persistent_sessions()
-    session_data['tick_history'] = list(session_data['tick_history'])
-    all_sessions[email] = session_data
-    with open(ACTIVE_SESSIONS_FILE, 'w') as f:
-        try: json.dump(all_sessions, f, indent=4)
-        except: pass
-    session_data['tick_history'] = deque(session_data['tick_history'], maxlen=3)
+# --- Simplified Session Management Functions ---
+# Note: Data persistence is lost across server restarts.
 
 def get_session_data(email):
-    all_sessions = load_persistent_sessions()
-    if email in all_sessions:
-        data = all_sessions[email]
-        for key, default_val in DEFAULT_SESSION_STATE.items():
-            if key not in data: data[key] = default_val
+    # Fetch data directly from Flask session, or use default state
+    data = session.get(f'bot_data_{email}', DEFAULT_SESSION_STATE.copy())
+    
+    # Ensure tick_history is a deque if needed internally, but store as list in session
+    if isinstance(data.get('tick_history'), list):
         data['tick_history'] = deque(data['tick_history'], maxlen=3)
-        return data
-    return DEFAULT_SESSION_STATE.copy()
+    
+    # Apply defaults if keys are missing (for initial run)
+    for key, default_val in DEFAULT_SESSION_STATE.items():
+        if key not in data: data[key] = default_val
+        
+    return data
+
+def save_session_data(email, session_data):
+    # Convert deque to list for storage in Flask session
+    if isinstance(session_data.get('tick_history'), deque):
+        session_data['tick_history'] = list(session_data['tick_history'])
+        
+    session[f'bot_data_{email}'] = session_data
 
 def delete_session_data(email):
-    all_sessions = load_persistent_sessions()
-    if email in all_sessions: del all_sessions[email]
-    with open(ACTIVE_SESSIONS_FILE, 'w') as f:
-        try: json.dump(all_sessions, f, indent=4)
-        except: pass
+    if f'bot_data_{email}' in session:
+        session.pop(f'bot_data_{email}')
 
-def load_allowed_users():
-    if not os.path.exists(USER_IDS_FILE): return set()
-    try:
-        with open(USER_IDS_FILE, 'r', encoding='utf-8') as f:
-            return {line.strip().lower() for line in f if line.strip()}
-    except: return set()
-        
 def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     global active_processes, active_ws
     current_data = get_session_data(email)
@@ -130,12 +115,12 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     
     if clear_data and stop_reason not in ["SL Reached", "TP Reached", "API Buy Error"]:
         delete_session_data(email)
-        print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}) and session data cleared from file.")
+        print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}) and session data cleared from session.")
     elif stop_reason in ["SL Reached", "TP Reached", "API Buy Error"]:
         print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}). Data kept temporarily for display.") 
 
 # ==========================================================
-# TRADING BOT FUNCTIONS
+# TRADING BOT FUNCTIONS (UNCHANGED LOGIC)
 # ==========================================================
 
 def calculate_martingale_stake(base_stake, current_stake, current_step):
@@ -264,19 +249,27 @@ def check_pnl_limits(email, contract_id, contract_profit):
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1
         
+        # 💡 UPDATED: Check for Max Consecutive Losses (3)
         if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES:
             save_session_data(email, current_data)
             stop_bot(email, clear_data=True, stop_reason="SL Reached")
             return
         
-        new_stake = calculate_martingale_stake(
-            current_data['base_stake'],
-            last_stake,
-            current_data['current_step']
-        )
-        
+        # 💡 UPDATED: Check if we exceeded MARTINGALE_STEPS (2)
+        if current_data['current_step'] > MARTINGALE_STEPS:
+             # If steps exceeded, reset to base stake (this handles the case where Max Loss isn't reached yet)
+            current_data['current_step'] = 0 
+            new_stake = current_data['base_stake']
+            print(f"⚠️ [MARTINGALE RESET] Max Martingale Steps ({MARTINGALE_STEPS}) exceeded. Resetting to base stake.")
+        else:
+            new_stake = calculate_martingale_stake(
+                current_data['base_stake'],
+                last_stake,
+                current_data['current_step']
+            )
+            print(f"💸 [MARTINGALE] Lost Cycle (Total PNL: {total_profit_loss:.2f}). Next stake (for EACH contract): {new_stake:.2f}.")
+
         current_data['current_stake'] = new_stake
-        print(f"💸 [MARTINGALE] Lost Cycle (Total PNL: {total_profit_loss:.2f}). Next stake (for EACH contract): {new_stake:.2f}.")
 
     if current_data['current_profit'] >= current_data['tp_target']:
         save_session_data(email, current_data)
@@ -294,13 +287,15 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
     global active_ws, RECONNECT_DELAY, ENTRY_LAST_DIGIT
     
     session_data = get_session_data(email)
+    
+    # Initialize/Reset the bot state
     session_data.update({
         "api_token": token, "base_stake": stake, "tp_target": tp, "is_running": True, "current_stake": stake,
         "stop_reason": "Running", "consecutive_losses": 0, "current_step": 0, "total_wins": 0, "total_losses": 0,
-        "current_profit": 0.0, "last_entry_time": 0, "last_trade_closed_time": 0, "last_entry_price": 0.0, "last_tick_data": None,
+        "current_profit": 0.0, "last_entry_time": 0, "last_trade_closed_time": 0, "last_entry_price": 0.0,
         "currency": currency, "account_type": account_type, "open_contract_ids": [], "open_prices": [], "open_time": 0,              
         "closed_contracts_pnl": 0.0, "closed_contracts_count": 0, "last_valid_tick_price": 0.0, 
-        "tick_history": deque(maxlen=3), "is_in_trade": False
+        "tick_history": [], "is_in_trade": False
     })
     save_session_data(email, session_data)
 
@@ -309,6 +304,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         ws_app.send(json.dumps({"authorize": current_data['api_token']}))
         ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
         
+        # Resubscribe to potentially open contracts if reconnected
         for contract_id in current_data.get('open_contract_ids', []):
             print(f"🔗 [RECONNECT] Resubscribing to Contract ID: {contract_id}")
             ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
@@ -325,6 +321,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         msg_type = data.get('msg_type')
         
         current_data = get_session_data(email)
+        # Check if the bot was stopped manually or by limits
         if not current_data.get('is_running'):
             ws_app.close()
             return
@@ -333,24 +330,29 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             current_price = float(data['tick']['quote'])
             current_epoch_time = int(data['tick']['epoch'])
             
+            # Update tick data
             current_data['last_valid_tick_price'] = current_price
+            
+            # Simple list for history storage, managed externally in save/get
+            if not isinstance(current_data['tick_history'], deque):
+                 current_data['tick_history'] = deque(current_data['tick_history'], maxlen=3)
             current_data['tick_history'].append(current_price)
             save_session_data(email, current_data)
             
-            # 💡 شرط الدخول: يتحقق فقط عند ظهور الرقم 5 في الخانة الأخيرة للتيك الجديد
+            # ENTRY CONDITION: Check if not in trade AND the last digit is '5'
             if not current_data.get('is_in_trade'):
                 
-                # 1. الحصول على الخانة الأخيرة من السعر
+                # 1. Get the last digit of the price
                 price_str = str(current_price)
                 if '.' in price_str:
                     last_digit_char = price_str.split('.')[-1][-1]
                 else:
                     last_digit_char = price_str[-1]
 
-                # 2. التحقق من الشرط (Last Digit = 5)
+                # 2. Check the condition
                 if last_digit_char == ENTRY_LAST_DIGIT:
                     print(f"✅ [ENTRY CHECK] Triggered by Last Digit = {ENTRY_LAST_DIGIT}. Price: {current_price}")
-                    # 3. إدخال الصفقتين في نفس الوقت
+                    # 3. Enter both trades
                     start_new_trade(email, current_data)
 
         elif msg_type == 'buy':
@@ -359,6 +361,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             current_data['open_contract_ids'].append(contract_id) 
             save_session_data(email, current_data)
             
+            # Subscribe to the contract result
             ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
         
         elif 'error' in data:
@@ -383,10 +386,11 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
     def on_close_wrapper(ws_app, code, msg):
         print(f"⚠ [PROCESS] WS closed for {email}. Reason: {code}/{msg}")
 
+    # Main Connection Loop
     while True:
         current_data = get_session_data(email)
         if not current_data.get('is_running'):
-            print(f"🛑 [PROCESS] Bot stopped manually or by SL/TP. Exiting loop for {email}.")
+            print(f"🛑 [PROCESS] Bot stopped. Exiting loop for {email}.")
             break
             
         print(f"🔗 [PROCESS] Attempting to connect for {email}...")
@@ -413,12 +417,14 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 
 
 # ==========================================================
-# FLASK APP SETUP AND ROUTES (UNCHANGED)
+# FLASK APP SETUP AND ROUTES 
 # ==========================================================
 
 app = Flask(__name__)
+# 💡 IMPORTANT: Must set a secret key for session management
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
 app.config['SESSION_PERMANENT'] = False
+# Removed USER_IDS_FILE and ACTIVE_SESSIONS_FILE handling
 
 AUTH_FORM = """
 <!doctype html>
@@ -430,7 +436,7 @@ AUTH_FORM = """
     button { background-color: blue; color: white; padding: 10px 15px; border: none; border-radius: 5px; cursor: pointer; }
 </style>
 <h1>Deriv Bot Login</h1>
-<p>Please enter your authorized email address:</p>
+<p>Please enter your email address to start a session:</p>
 {% with messages = get_flashed_messages(with_categories=true) %}
     {% if messages %}
         {% for category, message in messages %}
@@ -508,25 +514,22 @@ CONTROL_FORM = """
         {% for category, message in messages %}
             <p style="color:{{ 'green' if category == 'success' else ('blue' if category == 'info' else 'red') }};">{{ message }}</p>
         {% endfor %}
-        
-        {% if session_data and session_data.stop_reason and session_data.stop_reason not in ["Running", "Displayed"] %}
-            <p style="color:red; font-weight:bold;">Last Stop Reason: {{ session_data.stop_reason }}</p>
-        {% endif %}
     {% endif %}
 {% endwith %}
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = contract_type_onetouch + " (5 Ticks Barrier $\pm" + barrier_offset + "$)" %}
+    {% set strategy = "Dual Trade: 1x " + contract_type_1 + " (" + barrier_1 + ") + 1x " + contract_type_2 + " (" + barrier_2 + ")" %}
 
     <p class="status-running">✅ Bot is Running! (Strategy: {{ strategy_short }})</p>
-    <p style="color:blue; font-weight: bold;">📊 Entry Condition: **Second 0** of the minute</p>
-    <p style="color:blue; font-weight: bold;">🔬 Analysis: **10 Ticks Trend** (Up $\rightarrow +0.2$, Down $\rightarrow -0.2$)</p>
-    <p style="color:blue; font-weight: bold;">🎯 Contract: **Single ONETOUCH 5 Ticks Barrier $\pm 0.2$**</p>
+    <p style="color:blue; font-weight: bold;">🎯 Entry Condition: **Last Digit = {{ entry_last_digit }}**</p>
+    <p style="color:red; font-weight: bold;">⚠️ **Dual Trade Mode:** Base Stake used for EACH contract (Total Risk = Base Stake x 2).</p>
+    <p style="color:blue; font-weight: bold;">🎯 Contracts: **1x {{ contract_type_1 }} (Digit > {{ barrier_1 }}) + 1x {{ contract_type_2 }} (Digit < {{ barrier_2 }})**</p>
+    <p style="color:blue; font-weight: bold;">⏰ Duration: **{{ duration_1 }} Tick** (For both contracts)</p>
+    <p style="color:blue; font-weight: bold;">✅ Cycle Win Condition: **PNL(Trade 1) + PNL(Trade 2) > 0**</p>
     <p style="color:red; font-weight: bold;">⚠️ Martingale Multiplier: **x{{ martingale_multiplier|round(1) }}**</p>
-    <p style="color:red; font-weight: bold;">⚠️ Max Consecutive Losses: **{{ max_consecutive_losses }}** (Max Steps: {{ martingale_steps }})</p>
-    <p style="color:blue;">💡 Ticks History: {{ session_data.tick_history|length }} / {{ tick_analysis_count }}</p>
-    <p style="color:red;">💡 Auto-Reconnect Delay: {{ reconnect_delay }} second.</p>
+    <p style="color:red; font-weight: bold;">⚠️ Max Consecutive Losses: **{{ max_consecutive_losses }}** (Max Steps: **{{ martingale_steps }}**)</p>
+    <p style="color:blue;">💡 Auto-Reconnect Delay: {{ reconnect_delay }} second.</p>
     
     {% if session_data.open_contract_ids %}
     <p style="color: #007bff; font-weight: bold;">Open Contracts: {{ session_data.open_contract_ids|length }} / {{ total_contracts_per_trade }}</p>
@@ -537,7 +540,7 @@ CONTROL_FORM = """
 
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
     <p>Net Profit: {{ session_data.currency }} {{ session_data.current_profit|round(2) }}</p>
-    <p>Current Stake: {{ session_data.currency }} {{ session_data.current_stake|round(2) }}</p>
+    <p>Current Stake (Per Contract): {{ session_data.currency }} {{ session_data.current_stake|round(2) }}</p>
     <p>Step: {{ session_data.current_step }} / {{ martingale_steps }} (Max Consecutive Losses: {{ max_consecutive_losses }})</p>
     <p>Stats: {{ session_data.total_wins }} Wins | {{ session_data.total_losses }} Losses</p>
     <p style="font-weight: bold; color: purple;">Last Tick Price: {{ session_data.last_valid_tick_price|round(5) }}</p>
@@ -557,13 +560,13 @@ CONTROL_FORM = """
         </select><br>
 
         <label for="token">Deriv API Token:</label><br>
-        <input type="text" id="token" name="token" required value="{{ session_data.api_token if session_data else '' }}"><br>
+        <input type="text" id="token" name="token" required value="{{ session_data.api_token if session_data and session_data.api_token else '' }}"><br>
         
         <label for="stake">Base Stake (USD/tUSDT):</label><br>
-        <input type="number" id="stake" name="stake" value="{{ session_data.base_stake|round(2) if session_data else 0.35 }}" step="0.01" min="0.35" required><br>
+        <input type="number" id="stake" name="stake" value="{{ session_data.base_stake|round(2) if session_data and session_data.base_stake else 0.35 }}" step="0.01" min="0.35" required><br>
         
         <label for="tp">Take Profit Target (USD/tUSDT):</label><br>
-        <input type="number" id="tp" name="tp" value="{{ session_data.tp_target|round(2) if session_data else 10.0 }}" step="0.01" required><br>
+        <input type="number" id="tp" name="tp" value="{{ session_data.tp_target|round(2) if session_data and session_data.tp_target else 10.0 }}" step="0.01" required><br>
         
         <button type="submit" style="background-color: green; color: white;">🚀 Start Bot</button>
     </form>
@@ -572,6 +575,15 @@ CONTROL_FORM = """
 <a href="{{ url_for('logout') }}" style="display: block; text-align: center; margin-top: 15px; font-size: 1.1em;">Logout</a>
 
 <script>
+    function updateSecond() {
+        var now = new Date();
+        var seconds = now.getSeconds();
+        var secondElement = document.getElementById('current-second');
+        if (secondElement) {
+            secondElement.textContent = seconds;
+        }
+    }
+
     function autoRefresh() {
         var isRunning = {{ 'true' if session_data and session_data.is_running else 'false' }};
         
@@ -579,14 +591,18 @@ CONTROL_FORM = """
             setTimeout(function() {
                 window.location.reload();
             }, 1000); 
+            setInterval(updateSecond, 1000);
         }
     }
-
+    
+    updateSecond(); 
     autoRefresh();
 </script>
 """
+
 @app.before_request
 def check_user_status():
+    # Only checks if email is in session
     if request.endpoint in ('login', 'auth_page', 'logout', 'static'): 
         return
     
@@ -610,7 +626,7 @@ def index():
         elif reason.startswith("API Buy Error") or reason.startswith("WS Crash"): 
             flash(f"❌ Error: {reason}. Please check connection and restart the bot.", 'error')
             
-        delete_session_data(email)
+        delete_session_data(email) # Clears data from session
         
         return redirect(url_for('index')) 
         
@@ -669,8 +685,7 @@ def start_bot():
     try:
         account_type = request.form['account_type']
         currency = "USD" if account_type == 'demo' else "tUSDT"
-        current_data = get_session_data(email)
-        token = request.form['token'] if not current_data.get('api_token') or request.form.get('token') != current_data['api_token'] else current_data['api_token']
+        token = request.form['token'] 
         stake = float(request.form['stake'])
         tp = float(request.form['tp'])
     except ValueError:
@@ -695,15 +710,13 @@ def stop_route():
 
 @app.route('/logout')
 def logout():
+    stop_bot(session['email'], clear_data=True, stop_reason="Logged Out") # Stop process on logout
     session.pop('email', None)
     flash('Logged out successfully.', 'success')
     return redirect(url_for('auth_page'))
 
 
 if __name__ == '__main__':
-    if not os.path.exists(ACTIVE_SESSIONS_FILE):
-        with open(ACTIVE_SESSIONS_FILE, 'w') as f:
-            f.write('{}')
-            
+    # No file check needed anymore
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
