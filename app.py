@@ -21,9 +21,9 @@ DURATION_UNIT = "t"
 
 # إعدادات المضاعفة والتحليل
 TICK_SAMPLE_SIZE = 1           # يعتمد على التيك الأخير فقط
-MAX_CONSECUTIVE_LOSSES = 1     # الحد الأقصى للخسائر المتتالية
+MAX_CONSECUTIVE_LOSSES = 3     # الحد الأقصى للخسائر المتتالية
 MARTINGALE_MULTIPLIER = 6.0    # معامل المضاعفة (x6.0)
-MAX_MARTINGALE_STEP = 0        # الحد الأقصى لخطوات المضاعفة (الخسارة الثالثة هي توقف)
+MAX_MARTINGALE_STEP = 2        # الحد الأقصى لخطوات المضاعفة (الخسارة الثالثة هي توقف)
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
