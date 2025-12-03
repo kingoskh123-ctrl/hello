@@ -30,9 +30,9 @@ BARRIER_2 = "4"                     # الخانة المتوقعة < 4
 TOTAL_CONTRACTS_PER_TRADE = 2       
 
 # 🚨 RISK SETTINGS 
-MARTINGALE_MULTIPLIER = 29.0        
-MARTINGALE_STEPS = 1                
-MAX_CONSECUTIVE_LOSSES = 2          
+MARTINGALE_MULTIPLIER = 6.0        
+MARTINGALE_STEPS = 2                
+MAX_CONSECUTIVE_LOSSES = 3          
 
 # Entry Condition
 ENTRY_LAST_DIGIT = '5' # 💡 شرط الدخول: الخانة الأخيرة = 5
@@ -508,22 +508,25 @@ CONTROL_FORM = """
         {% for category, message in messages %}
             <p style="color:{{ 'green' if category == 'success' else ('blue' if category == 'info' else 'red') }};">{{ message }}</p>
         {% endfor %}
+        
+        {% if session_data and session_data.stop_reason and session_data.stop_reason not in ["Running", "Displayed"] %}
+            <p style="color:red; font-weight:bold;">Last Stop Reason: {{ session_data.stop_reason }}</p>
+        {% endif %}
     {% endif %}
 {% endwith %}
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = "Dual Trade: 1x " + contract_type_1 + " (" + barrier_1 + ") + 1x " + contract_type_2 + " (" + barrier_2 + ")" %}
+    {% set strategy = contract_type_onetouch + " (5 Ticks Barrier $\pm" + barrier_offset + "$)" %}
 
     <p class="status-running">✅ Bot is Running! (Strategy: {{ strategy_short }})</p>
-    <p style="color:blue; font-weight: bold;">🎯 Entry Condition: **Last Digit = {{ entry_last_digit }}**</p>
-    <p style="color:red; font-weight: bold;">⚠️ **Dual Trade Mode:** Base Stake used for EACH contract (Total Risk = Base Stake x 2).</p>
-    <p style="color:blue; font-weight: bold;">🎯 Contracts: **1x {{ contract_type_1 }} (Digit > {{ barrier_1 }}) + 1x {{ contract_type_2 }} (Digit < {{ barrier_2 }})**</p>
-    <p style="color:blue; font-weight: bold;">⏰ Duration: **{{ duration_1 }} Tick** (For both contracts)</p>
-    <p style="color:blue; font-weight: bold;">✅ Cycle Win Condition: **PNL(Trade 1) + PNL(Trade 2) > 0**</p>
+    <p style="color:blue; font-weight: bold;">📊 Entry Condition: **Second 0** of the minute</p>
+    <p style="color:blue; font-weight: bold;">🔬 Analysis: **10 Ticks Trend** (Up $\rightarrow +0.2$, Down $\rightarrow -0.2$)</p>
+    <p style="color:blue; font-weight: bold;">🎯 Contract: **Single ONETOUCH 5 Ticks Barrier $\pm 0.2$**</p>
     <p style="color:red; font-weight: bold;">⚠️ Martingale Multiplier: **x{{ martingale_multiplier|round(1) }}**</p>
     <p style="color:red; font-weight: bold;">⚠️ Max Consecutive Losses: **{{ max_consecutive_losses }}** (Max Steps: {{ martingale_steps }})</p>
-    <p style="color:blue;">💡 Auto-Reconnect Delay: {{ reconnect_delay }} second.</p>
+    <p style="color:blue;">💡 Ticks History: {{ session_data.tick_history|length }} / {{ tick_analysis_count }}</p>
+    <p style="color:red;">💡 Auto-Reconnect Delay: {{ reconnect_delay }} second.</p>
     
     {% if session_data.open_contract_ids %}
     <p style="color: #007bff; font-weight: bold;">Open Contracts: {{ session_data.open_contract_ids|length }} / {{ total_contracts_per_trade }}</p>
@@ -534,7 +537,7 @@ CONTROL_FORM = """
 
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
     <p>Net Profit: {{ session_data.currency }} {{ session_data.current_profit|round(2) }}</p>
-    <p>Current Stake (Per Contract): {{ session_data.currency }} {{ session_data.current_stake|round(2) }}</p>
+    <p>Current Stake: {{ session_data.currency }} {{ session_data.current_stake|round(2) }}</p>
     <p>Step: {{ session_data.current_step }} / {{ martingale_steps }} (Max Consecutive Losses: {{ max_consecutive_losses }})</p>
     <p>Stats: {{ session_data.total_wins }} Wins | {{ session_data.total_losses }} Losses</p>
     <p style="font-weight: bold; color: purple;">Last Tick Price: {{ session_data.last_valid_tick_price|round(5) }}</p>
@@ -569,15 +572,6 @@ CONTROL_FORM = """
 <a href="{{ url_for('logout') }}" style="display: block; text-align: center; margin-top: 15px; font-size: 1.1em;">Logout</a>
 
 <script>
-    function updateSecond() {
-        var now = new Date();
-        var seconds = now.getSeconds();
-        var secondElement = document.getElementById('current-second');
-        if (secondElement) {
-            secondElement.textContent = seconds;
-        }
-    }
-
     function autoRefresh() {
         var isRunning = {{ 'true' if session_data and session_data.is_running else 'false' }};
         
@@ -585,15 +579,12 @@ CONTROL_FORM = """
             setTimeout(function() {
                 window.location.reload();
             }, 1000); 
-            setInterval(updateSecond, 1000);
         }
     }
-    
-    updateSecond(); 
+
     autoRefresh();
 </script>
 """
-
 @app.before_request
 def check_user_status():
     if request.endpoint in ('login', 'auth_page', 'logout', 'static'): 
