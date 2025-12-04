@@ -416,7 +416,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         seconds = tick_time_epoch % 60
                         
                         # 💡 الشرط الجديد: إذا كانت الثانية 00 (بداية الدقيقة)
-                        if seconds == 0:
+                        if seconds == 58:
                             
                             # الإشارة موجودة، الحاجز هو الرقم الأخير للتيك نفسه (T_new)
                             barrier_to_use = T_new
