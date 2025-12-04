@@ -19,11 +19,11 @@ SYMBOL = "R_100"
 DURATION = 1           # مدة الصفقة 1 تيك
 DURATION_UNIT = "t"    
 
-# إعدادات التحليل والمضاعفة
-TICK_SAMPLE_SIZE = 5           
-MIN_REPETITION_COUNT = 3       
+# 💡 إعدادات التحليل (تعديل ليتناسب مع شرط 2 تيك)
+TICK_SAMPLE_SIZE = 2           
+MIN_REPETITION_COUNT = 0       # لم يعد يُستخدم، لكن نتركه 0
 
-# 💡 إعدادات المضاعفة
+# إعدادات المضاعفة
 MAX_CONSECUTIVE_LOSSES = 2     
 MARTINGALE_MULTIPLIER = 14.0   
 MAX_MARTINGALE_STEP = 1        
@@ -63,8 +63,8 @@ DEFAULT_SESSION_STATE = {
     "current_entry_id": None,              
     "open_contract_ids": [],               
     "contract_profits": {},                
-    "last_digits_history": [9, 9, 9, 9, 9],
-    "last_barrier_digit": None # 💡 جديد
+    "last_digits_history": [9] * TICK_SAMPLE_SIZE, 
+    "last_barrier_digit": None 
 }
 
 # --- Persistence functions ---
@@ -89,9 +89,8 @@ def get_session_data(email):
         data = all_sessions[email]
         for key, default_val in DEFAULT_SESSION_STATE.items():
             if key not in data: data[key] = default_val
-        if 'last_digits_history' not in data or len(data['last_digits_history']) != 5: 
-             data['last_digits_history'] = [9, 9, 9, 9, 9] 
-        # 💡 التأكد من وجود last_barrier_digit
+        if 'last_digits_history' not in data or len(data['last_digits_history']) != TICK_SAMPLE_SIZE: 
+             data['last_digits_history'] = [9] * TICK_SAMPLE_SIZE
         if 'last_barrier_digit' not in data:
             data['last_barrier_digit'] = None
             
@@ -141,6 +140,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     if email in is_contract_open: is_contract_open[email] = False
 
     if clear_data:
+        # عند الوقف التلقائي (SL/TP/API Error)، نترك البيانات محفوظة مؤقتاً لـ Flask index لتقوم بحذفها وإعادة التوجيه
         if stop_reason in ["SL Reached: Consecutive losses", "TP Reached", "API Buy Error"]:
             print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}). Data kept temporarily for display.")
         else:
@@ -242,7 +242,7 @@ def apply_martingale_logic(email):
         current_data['current_step'] = 0 
         current_data['consecutive_losses'] = 0
         current_data['current_stake'] = base_stake_used
-        # 💡 عند الربح، نعيد تعيين حاجز المضاعفة ليتم البحث عن إشارة جديدة
+        # عند الربح، نعيد تعيين حاجز المضاعفة ليتم البحث عن إشارة جديدة
         current_data['last_barrier_digit'] = None 
         entry_result_tag = "WIN"
         
@@ -276,7 +276,7 @@ def handle_contract_settlement(email, contract_id, profit_loss):
 
 def start_new_diff_trade(email, repeated_digit):
     """ إرسال صفقة DIGITDIFF ومسح سجل التيكات بعد الدخول الناجح """
-    global is_contract_open
+    global is_contract_open, TICK_SAMPLE_SIZE
     
     current_data = get_session_data(email)
     stake = current_data['current_stake']
@@ -286,13 +286,15 @@ def start_new_diff_trade(email, repeated_digit):
           stop_bot(email, clear_data=False, stop_reason=f"SL Reached: Consecutive losses") 
           return
     
-    # 💡 تحديد الحاجز: إذا كنا في مرحلة المضاعفة، نستخدم الحاجز المخزن. وإلا، نستخدم الحاجز الجديد
+    # تحديد الحاجز: إذا كنا في مرحلة المضاعفة، نستخدم الحاجز المخزن. وإلا، نستخدم الحاجز الجديد
     if current_data['consecutive_losses'] > 0 and current_data['last_barrier_digit'] is not None:
         barrier_to_use = current_data['last_barrier_digit']
         entry_source = "Martingale (Previous Loss)"
+    elif repeated_digit is not None: # Base Stake Entry
+        barrier_to_use = repeated_digit # في هذه الاستراتيجية يكون 9
+        entry_source = f"Base Stake (New Signal: 9 + <6)"
     else:
-        barrier_to_use = repeated_digit
-        entry_source = "Base Stake (New Signal)"
+        return
 
     current_data['current_entry_id'] = time.time()
     current_data['open_contract_ids'] = []
@@ -306,13 +308,10 @@ def start_new_diff_trade(email, repeated_digit):
     
     if send_single_trade_order(email, stake, currency_to_use, contract_type, barrier): 
         
-        # 💡 حفظ الحاجز المستخدم الآن للمضاعفة اللاحقة (في حال الخسارة)
+        # حفظ الحاجز أولاً، ثم مسح سجل التيكات
         current_data['last_barrier_digit'] = barrier
-        
-        # 💡 مسح سجل التيكات الخمسة (لإعادة البحث عن إشارة بعد الربح)
-        current_data['last_digits_history'] = [9, 9, 9, 9, 9] 
-        if current_data['consecutive_losses'] == 0:
-            print(f"🧹 [RESET] Tick history wiped. Bot waiting for {TICK_SAMPLE_SIZE} new ticks.")
+        current_data['last_digits_history'] = [9] * TICK_SAMPLE_SIZE 
+        print(f"🧹 [RESET] Tick history wiped. Bot waiting for {TICK_SAMPLE_SIZE} new ticks.")
 
         is_contract_open[email] = True 
 
@@ -343,8 +342,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "last_entry_price": 0.0, "last_tick_data": None, "currency": currency,
         "account_type": account_type, "last_valid_tick_price": 0.0,
         "current_entry_id": None, "open_contract_ids": [], "contract_profits": {},
-        "last_digits_history": [9, 9, 9, 9, 9] ,
-        # 💡 يجب أن يبقى last_barrier_digit كما هو في حال الاستئناف لمرحلة المضاعفة
+        "last_digits_history": [9] * TICK_SAMPLE_SIZE,
     })
     
     if session_data['consecutive_losses'] > 0:
@@ -354,7 +352,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         session_data['current_step'] = step
         print(f"🔍 [RECOVERY] Resuming in Martingale mode (Step {step}). Stake: {current_stake:.2f}. Using stored barrier {session_data['last_barrier_digit']}.")
     else:
-        session_data['last_barrier_digit'] = None # تأكد من إعادة التعيين في Base Stake
+        session_data['last_barrier_digit'] = None 
 
     save_session_data(email, session_data)
 
@@ -403,7 +401,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         
                     T_new = int(str(current_price)[-1])
                     
-                    history = current_data.get('last_digits_history', [9, 9, 9, 9, 9])
+                    history = current_data.get('last_digits_history', [9] * TICK_SAMPLE_SIZE)
                     history.insert(0, T_new) 
                     current_data['last_digits_history'] = history[:TICK_SAMPLE_SIZE] 
                     
@@ -415,29 +413,30 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     # 2. التحقق من شرط الدخول (Martingale Pure Logic)
                     if not is_contract_open.get(email) and current_data['consecutive_losses'] < MAX_CONSECUTIVE_LOSSES:
                         
-                        repeated_digit = None
+                        barrier_to_use = None
                         
                         # 💡 1. إذا كنا في مرحلة المضاعفة (خسارة سابقة): ندخل فوراً بالرقم المخزن
                         if current_data['consecutive_losses'] > 0 and current_data['last_barrier_digit'] is not None:
-                            # لا حاجة لتحليل التيكات، فقط ندخل
                             start_new_diff_trade(email, repeated_digit=None) 
                             current_data = get_session_data(email) 
                             
-                        # 💡 2. إذا كنا في مرحلة الـ Base Stake: يجب البحث عن إشارة 3/5
+                        # 💡 2. إذا كنا في مرحلة الـ Base Stake: البحث عن إشارة (9) + (<6)
                         elif current_data['consecutive_losses'] == 0:
                             if len(history) < TICK_SAMPLE_SIZE: 
                                 save_session_data(email, current_data)
-                                return # لم نجمع 5 تيكات بعد
+                                return 
 
-                            digit_counts = Counter(current_data['last_digits_history'])
+                            # T1_last_digit هو آخر تيك (الأحدث)
+                            T1_last_digit = history[0]
+                            # T2_last_digit هو التيك الذي سبقه (الأقدم)
+                            T2_last_digit = history[1]
                             
-                            for digit, count in digit_counts.items():
-                                if count >= MIN_REPETITION_COUNT:
-                                    repeated_digit = digit
-                                    break 
+                            # الشرط الجديد: التيك الأحدث هو 9، والتيك الذي سبقه أصغر من 6
+                            if T1_last_digit == 9 and T2_last_digit < 6:
+                                barrier_to_use = 9 # الحاجز الثابت هو 9
                             
-                            if repeated_digit is not None:
-                                start_new_diff_trade(email, repeated_digit=repeated_digit)
+                            if barrier_to_use is not None:
+                                start_new_diff_trade(email, repeated_digit=barrier_to_use)
                                 current_data = get_session_data(email) 
                             
                     save_session_data(email, current_data) 
@@ -460,6 +459,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         current_data['contract_profits'][f"error-{time.time()}"] = -current_data['current_stake']
                         apply_martingale_logic(email)
                         
+                        # هنا يتم وقف البوت في الـ Multiprocess
                         stop_bot(email, clear_data=False, stop_reason=f"API Buy Error: {error_message}")
 
 
@@ -574,7 +574,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = 'Pure Martingale (x' + martingale_multiplier|string + ') | Base Entry: DIGITDIFF on 5 Ticks (Repetition >= ' + min_repetition_count|string + ') | Subsequent Entries: Same Barrier as Loss' %}
+    {% set strategy = 'Pure Martingale (x' + martingale_multiplier|string + ') | Base Entry: DIGITDIFF on (Last Digit 9 + Previous Digit < 6) | Barrier: 9 | Subsequent Entries: Same Barrier as Loss' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -626,7 +626,10 @@ CONTROL_FORM = """
         var isRunning = {{ 'true' if session_data and session_data.is_running else 'false' }};
         var refreshInterval = 1000; // 1000ms = 1 second
         
-        if (isRunning) {
+        // منع إعادة تحميل الصفحة إذا كانت متوقفة وتنتظر الإعدادات الجديدة
+        var isStoppedForSettings = {{ 'true' if not session_data.is_running and session_data.stop_reason not in ["Running", "Disconnected (Auto-Retry)", "Displayed"] else 'false' }};
+        
+        if (isRunning || isStoppedForSettings) {
             setTimeout(function() {
                 window.location.reload();
             }, refreshInterval);
@@ -679,7 +682,7 @@ def index():
     email = session['email']
     session_data = get_session_data(email)
     
-    # 💡 التعديل الرئيسي هنا: مسح البيانات وعرض رسالة الوقف/الهدف
+    # 💡 منطق التحقق من الوقف التلقائي وإعادة التوجيه
     if not session_data.get('is_running') and session_data.get("stop_reason") not in ["Stopped Manually", "Running", "Disconnected (Auto-Retry)", "Displayed"]:
         reason = session_data["stop_reason"]
         
@@ -698,6 +701,7 @@ def index():
             delete_session_data(email) # 🗑️ مسح البيانات بالكامل
             return redirect(url_for('index')) # إعادة توجيه لعرض صفحة الإعدادات
             
+        # إذا لم يكن أحد الأسباب أعلاه (قد يكون سبب قديم تم عرضه سابقاً)
         session_data['stop_reason'] = "Displayed"
         save_session_data(email, session_data)
     
@@ -769,7 +773,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    strategy_desc = f'Pure Martingale (x{MARTINGALE_MULTIPLIER}) | Base Entry: DIGITDIFF on 5 Ticks (Repetition >= {MIN_REPETITION_COUNT}) | Subsequent Entries: Same Barrier as Loss.'
+    strategy_desc = 'Pure Martingale (x14.0) | Base Entry: DIGITDIFF on (Last Digit 9 + Previous Digit < 6) | Barrier: 9 | Subsequent Entries: Same Barrier as Loss.'
     flash(f'Bot started successfully. Strategy: {strategy_desc}', 'success')
     return redirect(url_for('index'))
 
@@ -799,6 +803,8 @@ def logout():
 if __name__ == '__main__':
     all_sessions = load_persistent_sessions()
     for email in list(all_sessions.keys()):
+        # عند البدء، نوقف أي عملية سابقة ونمسح بياناتها مباشرة
+        delete_session_data(email)
         stop_bot(email, clear_data=False, stop_reason="Disconnected (Auto-Retry)")
         
     port = int(os.environ.get("PORT", 5000))
