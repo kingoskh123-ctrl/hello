@@ -626,10 +626,8 @@ CONTROL_FORM = """
         var isRunning = {{ 'true' if session_data and session_data.is_running else 'false' }};
         var refreshInterval = 1000; // 1000ms = 1 second
         
-        // منع إعادة تحميل الصفحة إذا كانت متوقفة وتنتظر الإعدادات الجديدة
-        var isStoppedForSettings = {{ 'true' if not session_data.is_running and session_data.stop_reason not in ["Running", "Disconnected (Auto-Retry)", "Displayed"] else 'false' }};
-        
-        if (isRunning || isStoppedForSettings) {
+        // 💡 التحديث يتم فقط إذا كان البوت في حالة تشغيل
+        if (isRunning) {
             setTimeout(function() {
                 window.location.reload();
             }, refreshInterval);
@@ -682,7 +680,7 @@ def index():
     email = session['email']
     session_data = get_session_data(email)
     
-    # 💡 منطق التحقق من الوقف التلقائي وإعادة التوجيه
+    # 💡 منطق التحقق من الوقف التلقائي وإعادة التوجيه (لضمان مسح البيانات بعد SL/TP)
     if not session_data.get('is_running') and session_data.get("stop_reason") not in ["Stopped Manually", "Running", "Disconnected (Auto-Retry)", "Displayed"]:
         reason = session_data["stop_reason"]
         
