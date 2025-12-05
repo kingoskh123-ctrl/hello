@@ -20,7 +20,7 @@ DURATION = 1           # مدة الصفقة 1 تيك
 DURATION_UNIT = "t"    
 
 # إعدادات المضاعفة والتحليل
-TICK_SAMPLE_SIZE = 5             # 💡 تم التعديل إلى 5 تيكات
+TICK_SAMPLE_SIZE = 5             
 MAX_CONSECUTIVE_LOSSES = 1       
 MARTINGALE_MULTIPLIER = 14.0     
 MAX_MARTINGALE_STEP = 1          
@@ -61,7 +61,7 @@ DEFAULT_SESSION_STATE = {
     "open_contract_ids": [],                 
     "contract_profits": {},                  
     "last_two_digits": [9, 9],
-    "last_digits_history": [9, 9, 9, 9, 9], # 💡 تم التعديل إلى 5 عناصر
+    "last_digits_history": [9, 9, 9, 9, 9], 
     "last_trade_barrier": 9 
 }
 
@@ -402,9 +402,11 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 
                     # T1: الأحدث (index 0)
                     # T3: index 2
+                    # T4: index 3
                     # T5: الأقدم (index 4)
                     T1 = current_data['last_digits_history'][0]
                     T3 = current_data['last_digits_history'][2] 
+                    T4 = current_data['last_digits_history'][3] # تم استخراج T4 
                     T5 = current_data['last_digits_history'][4] 
                     
                     current_data['last_valid_tick_price'] = current_price
@@ -414,19 +416,19 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     # 2. التحقق من شرط الدخول (5 تيك، شرط T1=T3=T5)
                     if not is_contract_open.get(email):
                         
-                        # 💡 شرط الدخول الجديد: T1=T3 و T1=T5
+                        # شرط الدخول: T1=T3 و T1=T5
                         condition_met = (T1 == T3) and (T1 == T5)
                         
                         if condition_met:
                             
-                            # الرقم المتكرر هو الحاجز (Barrier) لـ DIGITDIFF
-                            barrier_digit = T1 
+                            # 💡 التعديل هنا: الحاجز هو T4
+                            barrier_digit = T4 
 
                             entry_mode = "Initial Trade"
                             if current_data.get('consecutive_losses', 0) > 0:
                                 entry_mode = f"Martingale Step {current_data['current_step']}"
                                 
-                            print(f"📊 [ENTRY CONDITION MET] T1={T1}, T3={T3}, T5={T5}. Entering Single DIGITDIFF {barrier_digit}. ({entry_mode})")
+                            print(f"📊 [ENTRY CONDITION MET] T1={T1}, T3={T3}, T5={T5}. Barrier is T4={T4}. Entering Single DIGITDIFF {barrier_digit}. ({entry_mode})")
                             
                             # --- منطق بدء الصفقة الجديدة ---
                             stake = current_data['current_stake']
@@ -590,7 +592,7 @@ CONTROL_FORM = """
 
 {% if session_data and session_data.is_running %}
     {# 💡 تحديث وصف الاستراتيجية #}
-    {% set strategy = 'Single DigitDiff | Entry: T1=T3=T5 (5 Ticks Analysis) | Immediate Martingale on Loss | x' + martingale_multiplier|string + ' Martingale, Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string %}
+    {% set strategy = 'Single DigitDiff | Entry: T1=T3=T5 (5 Ticks Analysis) | Barrier: T4 | Immediate Martingale on Loss | x' + martingale_multiplier|string + ' Martingale, Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -783,7 +785,7 @@ def start_bot():
     with PROCESS_LOCK: active_processes[email] = process
     
     # 💡 تحديث وصف الاستراتيجية في رسالة Flash
-    flash(f'Bot started successfully. Strategy: Single DigitDiff on T1=T3=T5 (5 Ticks Analysis) / Immediate Martingale on Loss, with x{MARTINGALE_MULTIPLIER} Martingale (Max {MAX_CONSECUTIVE_LOSSES} Losses, Max Step {MAX_MARTINGALE_STEP})', 'success')
+    flash(f'Bot started successfully. Strategy: Single DigitDiff on T1=T3=T5 (5 Ticks Analysis) / Barrier: T4 / Immediate Martingale on Loss, with x{MARTINGALE_MULTIPLIER} Martingale (Max {MAX_CONSECUTIVE_LOSSES} Losses, Max Step {MAX_MARTINGALE_STEP})', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
