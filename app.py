@@ -12,28 +12,28 @@ import traceback
 from collections import Counter
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (R_100 | 4 Ticks T1=T2=T4 DIFFERS | Martingale x14.0 | Max Loss 2)
+# BOT CONSTANT SETTINGS (R_100 | 3 Ticks T1=T3 DIFFERS | Martingale x14.0 | Max Loss 1)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100" 
-DURATION = 1              # مدة الصفقة 1 تيك
-DURATION_UNIT = "t"       # الوحدة بالتيكات
+DURATION = 1              
+DURATION_UNIT = "t"       
 
-# 💡 إعدادات تحليل التيكات (لا تغيير)
-TICK_SAMPLE_SIZE = 4      # عدد التيكات المطلوبة لتكوين الإشارة (T1, T2, T3, T4)
+# 💡 إعدادات تحليل التيكات (تم التغيير هنا)
+TICK_SAMPLE_SIZE = 3      # عدد التيكات المطلوبة الآن (T1, T2, T3)
 CONTRACT_TYPE_BASE = "DIGITDIFFERS" # نوع العقد: مختلف
 DEFAULT_DIFFERS_BARRIER = 5         # حاجز افتراضي، سيتم استبداله بالرقم المكرر (T1)
 
-# 💡 إعدادات المضاعفة (تغيير هنا!)
-MAX_CONSECUTIVE_LOSSES = 1    # أقصى خسائر متتالية مسموح بها (SL بعد الخسارة الثانية)
-MARTINGALE_MULTIPLIER = 14.0   # مضاعف الخسارة (الآن ×14.0)
+# 💡 إعدادات المضاعفة (تبقى كما هي)
+MAX_CONSECUTIVE_LOSSES = 1    
+MARTINGALE_MULTIPLIER = 14.0   
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 
 # ==========================================================
-# GLOBAL STATE
+# GLOBAL STATE (No change needed)
 # ==========================================================
 active_processes = {}
 active_ws = {}
@@ -64,8 +64,7 @@ DEFAULT_SESSION_STATE = {
     "open_contract_ids": [],              
     "contract_profits": {},               
     
-    # متغيرات حالة تحليل التيكات
-    "last_digits_history": [0] * TICK_SAMPLE_SIZE, 
+    "last_digits_history": [0] * TICK_SAMPLE_SIZE, # يتم تهيئته لـ 3 أصفار
     "last_trade_contract_type": CONTRACT_TYPE_BASE, 
     "last_trade_barrier": DEFAULT_DIFFERS_BARRIER, 
     
@@ -98,10 +97,9 @@ def get_session_data(email):
         for key, default_val in DEFAULT_SESSION_STATE.items():
             if key not in data: data[key] = default_val
         
-        # ضبط حجم سجل التيكات
+        # ضبط حجم سجل التيكات إلى 3
         if 'last_digits_history' not in data or len(data['last_digits_history']) != TICK_SAMPLE_SIZE: 
              data['last_digits_history'] = [0] * TICK_SAMPLE_SIZE
-        # ضبط أنواع العقود في حالة عدم وجودها
         if 'last_trade_contract_type' not in data: data['last_trade_contract_type'] = CONTRACT_TYPE_BASE
         if 'last_trade_barrier' not in data: data['last_trade_barrier'] = DEFAULT_DIFFERS_BARRIER
             
@@ -156,7 +154,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
         print(f"⚠ [INFO] WS closed for {email}. Process terminated. Data retained.")
 
 # ==========================================================
-# TRADING BOT FUNCTIONS
+# TRADING BOT FUNCTIONS (المنطق يبقى كما هو باستثناء إشارة الدخول)
 # ==========================================================
 
 def calculate_martingale_stake(base_stake, consecutive_losses, multiplier):
@@ -164,9 +162,6 @@ def calculate_martingale_stake(base_stake, consecutive_losses, multiplier):
     if consecutive_losses == 0:  
         return base_stake
     
-    # الصيغة الرياضية للمضاعف الجديد: base * (multiplier ** consecutive_losses)
-    # T1: base * 14.0^1
-    # T2: base * 14.0^2 
     return base_stake * (multiplier ** consecutive_losses)
 
 
@@ -179,7 +174,6 @@ def send_single_trade_order(email, stake, currency, contract_type, barrier):
         
     ws_app = active_ws[email]
     
-    # تحويل الحاجز إلى سلسلة نصية حيث أن API تتطلب ذلك
     barrier_str = str(barrier) 
     
     trade_request = {
@@ -236,7 +230,6 @@ def apply_martingale_logic(email):
         current_data['consecutive_losses'] += 1 
         
         # 🛑 حالة الوقف الخسارة (SL Reached)
-        # التوقف بعد الخسارة الثانية (لأن MAX_CONSECUTIVE_LOSSES = 2)
         if current_data['consecutive_losses'] > MAX_CONSECUTIVE_LOSSES:
             reason = f"SL Reached: Max {MAX_CONSECUTIVE_LOSSES} consecutive losses."
             current_data["is_running"] = False
@@ -293,7 +286,7 @@ def apply_martingale_logic(email):
 
 def start_recovery_trade(email, contract_type, barrier):
     """ يتم استدعاؤها لإرسال صفقة المضاعفة فوراً بعد الخسارة """
-    global is_contract_open
+    global is_contract_open, MAX_CONSECUTIVE_LOSSES
     
     current_data = get_session_data(email)
     stake = current_data['current_stake']
@@ -401,8 +394,8 @@ def bot_core_logic(email, token, stake, tp, currency, account_type, reconnect=Fa
             "last_entry_price": 0.0, "last_tick_data": None, "currency": currency,
             "account_type": account_type, "last_valid_tick_price": 0.0,
             "current_entry_id": None, "open_contract_ids": [], "contract_profits": {},
-            "last_digits_history": [0] * TICK_SAMPLE_SIZE,
-            # تعيين القيم الافتراضية هنا
+            # تحديث تهيئة حجم سجل التيكات هنا أيضاً
+            "last_digits_history": [0] * TICK_SAMPLE_SIZE, 
             "last_trade_contract_type": CONTRACT_TYPE_BASE,
             "last_trade_barrier": DEFAULT_DIFFERS_BARRIER,
         })
@@ -488,7 +481,8 @@ def bot_core_logic(email, token, stake, tp, currency, account_type, reconnect=Fa
 
                     # 1. تحديث سجل الأرقام الأخيرة
                     current_data['last_digits_history'].append(T_new)
-                    current_data['last_digits_history'] = current_data['last_digits_history'][-TICK_SAMPLE_SIZE:]
+                    # الحفاظ على آخر 3 تيكات فقط
+                    current_data['last_digits_history'] = current_data['last_digits_history'][-TICK_SAMPLE_SIZE:] 
                     
                     
                     # 2. التحقق من شرط الدخول
@@ -500,17 +494,16 @@ def bot_core_logic(email, token, stake, tp, currency, account_type, reconnect=Fa
                             if len(current_data['last_digits_history']) == TICK_SAMPLE_SIZE:
                                 history = current_data['last_digits_history']
                                 
-                                T1 = history[0]
-                                T2 = history[1]
-                                T4 = history[3] # التيك الأخير
+                                T1 = history[0] # التيك الأول
+                                T3 = history[2] # التيك الأخير
                                 
-                                # الشرط: يجب أن يكون التيك الأول والثاني والرابع متساويين
-                                is_signal = (T1 == T2) and (T1 == T4)
+                                # الشرط الجديد: يجب أن يكون التيك الأول والثالث متساويين
+                                is_signal = (T1 == T3) 
                                 
                                 if is_signal:
                                     # الحاجز لصفقة Differs هو الرقم المكرر (T1)
                                     differs_barrier = T1 
-                                    print(f"🔥 [SIGNAL FOUND] 4 Ticks: {history}. Condition T1({T1}) == T2({T2}) == T4({T4}) met. Entering {CONTRACT_TYPE_BASE} {differs_barrier}.")
+                                    print(f"🔥 [SIGNAL FOUND] 3 Ticks: {history}. Condition T1({T1}) == T3({T3}) met. Entering {CONTRACT_TYPE_BASE} {differs_barrier}.")
                                     start_new_trade_on_signal(email, contract_type=CONTRACT_TYPE_BASE, barrier=differs_barrier)
                                 
                     save_session_data(email, current_data)
@@ -579,7 +572,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type, reconnect=Fa
         
     except Exception as process_error:
         print(f"\n\n💥💥 [CRITICAL PROCESS CRASH] The entire bot process for {email} failed with an unhandled exception: {process_error}")
-        traceback.print_exc()
+        tracebox.print_exc()
         reason = "Critical Python Crash"
         current_data = get_session_data(email)
         current_data["is_running"] = False
@@ -718,7 +711,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = '4 Ticks Signal (T1=T2=T4) Martingale (x' + martingale_multiplier|string + ', Max Loss ' + max_consecutive_losses|string + ') | Entry: ' + contract_type %}
+    {% set strategy = '3 Ticks Signal (T1=T3) Martingale (x' + martingale_multiplier|string + ', Max Loss ' + max_consecutive_losses|string + ') | Entry: ' + contract_type %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -730,7 +723,7 @@ CONTROL_FORM = """
     <p style="font-weight: bold; color: #ff5733;">Contracts Open: {{ session_data.open_contract_ids|length }}</p>
     <p style="font-weight: bold; color: orange;">Last Trade: {{ session_data.last_trade_contract_type if session_data.last_trade_contract_type else 'N/A' }} Differs {{ session_data.last_trade_barrier if session_data.last_trade_barrier is not none else 'N/A' }}</p>
     <p style="font-weight: bold; color: orange;">Last Tick Price: {{ session_data.last_valid_tick_price|round(3) if session_data.last_valid_tick_price else 'N/A' }}</p>
-    <p style="font-weight: bold; color: darkorange;">Last Digits (T1..T4): {{ session_data.last_digits_history }}</p>
+    <p style="font-weight: bold; color: darkorange;">Last Digits (T1..T3): {{ session_data.last_digits_history }}</p>
     
     <form method="POST" action="{{ url_for('stop_route') }}">
         <button type="submit" style="background-color: red; color: white;">🛑 Stop Bot</button>
@@ -898,7 +891,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    strategy_desc = f'4 Ticks Signal (T1=T2=T4) Martingale (x{MARTINGALE_MULTIPLIER:.1f}, Max Loss {MAX_CONSECUTIVE_LOSSES}) | Entry: {CONTRACT_TYPE_BASE} Differs (Barrier: T1)'
+    strategy_desc = f'3 Ticks Signal (T1=T3) Martingale (x{MARTINGALE_MULTIPLIER:.1f}, Max Loss {MAX_CONSECUTIVE_LOSSES}) | Entry: {CONTRACT_TYPE_BASE} Differs (Barrier: T1)'
     flash(f'Bot started successfully. Strategy: {strategy_desc}', 'success')
     return redirect(url_for('index'))
 
