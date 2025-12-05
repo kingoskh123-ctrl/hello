@@ -16,17 +16,17 @@ from collections import Counter
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100" 
-DURATION = 1              # مدة الصفقة 1 تيك (تم التعديل)
-DURATION_UNIT = "t"       # الوحدة بالتيكات (تم التعديل)
+DURATION = 1              # مدة الصفقة 1 تيك
+DURATION_UNIT = "t"       # الوحدة بالتيكات
 
-# 💡 إعدادات تحليل التيكات الجديدة
-TICK_SAMPLE_SIZE = 3      # عدد التيكات المطلوبة لتكوين الإشارة (تم التعديل)
-MIN_REPETITION_COUNT = 3  # يجب أن تتكرر 3 مرات (تم التعديل)
+# إعدادات تحليل التيكات
+TICK_SAMPLE_SIZE = 3      # عدد التيكات المطلوبة لتكوين الإشارة
+MIN_REPETITION_COUNT = 3  # يجب أن تتكرر 3 مرات
 
-# إعدادات المضاعفة (تم الاحتفاظ بها)
-MAX_CONSECUTIVE_LOSSES = 2    # أقصى خسائر متتالية مسموح بها
-MARTINGALE_MULTIPLIER = 14.0   # مضاعف الخسارة
-MAX_MARTINGALE_STEP = 1       # أقصى خطوة مضاعفة (3 خسائر متتالية)
+# 💡 إعدادات المضاعفة الجديدة بناءً على طلبك
+MAX_CONSECUTIVE_LOSSES = 2    # أقصى خسائر متتالية مسموح بها (تم التعديل)
+MARTINGALE_MULTIPLIER = 14.0  # مضاعف الخسارة (تم التعديل)
+MAX_MARTINGALE_STEP = 1       # أقصى خطوة مضاعفة (تم التعديل)
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
@@ -64,11 +64,9 @@ DEFAULT_SESSION_STATE = {
     "open_contract_ids": [],              
     "contract_profits": {},               
     
-    # 💡 متغيرات الحالة المعاد تنشيطها لتحليل التيكات
-    "last_digits_history": [9] * TICK_SAMPLE_SIZE, # سجل آخر 3 أرقام
+    "last_digits_history": [9] * TICK_SAMPLE_SIZE, 
     "last_barrier_digit": None, 
     
-    # متغيرات الشموع القديمة التي سيتم تجاهلها
     "current_ohlc_ticks": 0,
     "current_ohlc_open_price": 0.0,
     "ohlc_history": [],
@@ -98,7 +96,6 @@ def get_session_data(email):
         for key, default_val in DEFAULT_SESSION_STATE.items():
             if key not in data: data[key] = default_val
         
-        # 💡 ضبط حجم سجل التيكات
         if 'last_digits_history' not in data or len(data['last_digits_history']) != TICK_SAMPLE_SIZE: 
              data['last_digits_history'] = [9] * TICK_SAMPLE_SIZE
         if 'last_barrier_digit' not in data:
@@ -150,11 +147,8 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     if email in is_contract_open: is_contract_open[email] = False
 
     if clear_data:
-        if stop_reason in ["SL Reached: Max 4 consecutive losses", "TP Reached", "API Buy Error"]:
-            print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}). Data kept temporarily for display.")
-        else:
-            delete_session_data(email)
-            print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}) and session data cleared from file.")
+        delete_session_data(email)
+        print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}) and session data CLEARED.")
     else:
         print(f"⚠ [INFO] WS closed for {email}. Attempting immediate reconnect.")
 # --- End of Persistence and Control functions ---
@@ -192,7 +186,7 @@ def send_single_trade_order(email, stake, currency, contract_type, barrier):
             "duration": DURATION, 
             "duration_unit": DURATION_UNIT,
             "symbol": SYMBOL,
-            "barrier": barrier # 💡 إعادة إضافة الحاجز
+            "barrier": barrier
         }
     }
     try:
@@ -219,9 +213,12 @@ def apply_martingale_logic(email):
     current_data['current_profit'] += total_profit_loss
     base_stake_used = current_data['base_stake']
     
+    # ✅ حالة جني الأرباح (TP Reached)
     if current_data['current_profit'] >= current_data['tp_target']:
+        current_data["is_running"] = False
+        current_data["stop_reason"] = "TP Reached"
         save_session_data(email, current_data)
-        stop_bot(email, clear_data=False, stop_reason="TP Reached") 
+        stop_bot(email, clear_data=True, stop_reason="TP Reached") 
         return
         
     
@@ -231,9 +228,13 @@ def apply_martingale_logic(email):
         current_data['consecutive_losses'] += 1
         entry_result_tag = "LOSS"
         
+        # 🛑 حالة الوقف الخسارة (SL Reached)
         if current_data['consecutive_losses'] > MAX_CONSECUTIVE_LOSSES:
+            reason = f"SL Reached: Max {MAX_CONSECUTIVE_LOSSES} consecutive losses"
+            current_data["is_running"] = False
+            current_data["stop_reason"] = reason
             save_session_data(email, current_data)
-            stop_bot(email, clear_data=False, stop_reason=f"SL Reached: Max {MAX_CONSECUTIVE_LOSSES} consecutive losses") 
+            stop_bot(email, clear_data=True, stop_reason=reason) 
             return
             
         current_data['current_step'] = min(current_data['current_step'] + 1, MAX_MARTINGALE_STEP)
@@ -244,16 +245,13 @@ def apply_martingale_logic(email):
         barrier_tag = current_data.get('last_barrier_digit', 'N/A')
         print(f"🔄 [LOSS - MARTINGALE] PnL: {total_profit_loss:.2f}. Con. Loss: {current_data['consecutive_losses']}/{MAX_CONSECUTIVE_LOSSES}. Next Stake calculated: {round(new_stake, 2):.2f}. Retrying Diff {barrier_tag}...")
         
-        # 💡 يتم الدخول فورا بنفس الرقم (سيتم تنفيذه في on_message_wrapper عند أول تيك قادم)
-
     # ✅ حالة الربح (Win)
     else: 
         current_data['total_wins'] += 1 
         current_data['current_step'] = 0 
         current_data['consecutive_losses'] = 0
         current_data['current_stake'] = base_stake_used
-        current_data['last_barrier_digit'] = None # إعادة تعيين الحاجز عند الربح
-        # 💡 مسح سجل التيكات عند الربح لإعادة البحث عن إشارة جديدة
+        current_data['last_barrier_digit'] = None 
         current_data['last_digits_history'] = [9] * TICK_SAMPLE_SIZE
         entry_result_tag = "WIN"
         
@@ -265,7 +263,7 @@ def apply_martingale_logic(email):
     current_data['contract_profits'] = {}
     save_session_data(email, current_data) 
     
-    is_contract_open[email] = False # السماح بالدخول عند أول إشارة قادمة
+    is_contract_open[email] = False 
 
 
 def handle_contract_settlement(email, contract_id, profit_loss):
@@ -293,8 +291,13 @@ def start_new_diff_trade(email, repeated_digit):
     stake = current_data['current_stake']
     currency_to_use = current_data['currency']
     
+    # 🛑 يتم إيقاف البوت وحذف بياناته إذا تجاوز حد الـ SL (تحقق إضافي)
     if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES:
-         stop_bot(email, clear_data=False, stop_reason=f"SL Reached: Max {MAX_CONSECUTIVE_LOSSES} consecutive losses") 
+         reason = f"SL Reached: Max {MAX_CONSECUTIVE_LOSSES} consecutive losses"
+         current_data["is_running"] = False
+         current_data["stop_reason"] = reason
+         save_session_data(email, current_data)
+         stop_bot(email, clear_data=True, stop_reason=reason) 
          return
     
     
@@ -344,7 +347,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "last_entry_price": 0.0, "last_tick_data": None, "currency": currency,
         "account_type": account_type, "last_valid_tick_price": 0.0,
         "current_entry_id": None, "open_contract_ids": [], "contract_profits": {},
-        "last_digits_history": [9] * TICK_SAMPLE_SIZE, # إعادة ضبط سجل التيكات
+        "last_digits_history": [9] * TICK_SAMPLE_SIZE,
         "last_barrier_digit": None,
     })
     
@@ -372,7 +375,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 current_data = get_session_data(email) 
                 ws_app.send(json.dumps({"authorize": current_data['api_token']}))
                 
-                # 💡 نطلب التيكات مباشرة
+                # نطلب التيكات مباشرة
                 ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1})) 
                 
                 running_data = get_session_data(email)
@@ -422,12 +425,12 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         
                         barrier_to_use = None
                         
-                        # 💡 في حالة الخسارة (المضاعفة)، ندخل مباشرة بنفس الحاجز الذي خسرنا فيه
+                        # في حالة الخسارة (المضاعفة)، ندخل مباشرة بنفس الحاجز الذي خسرنا فيه
                         if current_data['consecutive_losses'] > 0 and current_data['last_barrier_digit'] is not None:
                             barrier_to_use = current_data['last_barrier_digit']
                             print(f"🔥 [MARTINGALE RE-ENTRY] Consecutive loss: {current_data['consecutive_losses']}. Re-entering Diff {barrier_to_use}.")
 
-                        # 💡 في حالة عدم وجود خسارة متتالية (البحث عن إشارة جديدة)
+                        # في حالة عدم وجود خسارة متتالية (البحث عن إشارة جديدة)
                         elif current_data['consecutive_losses'] == 0:
                             
                             # شرط الإشارة: تكرار الرقم 3 مرات
@@ -468,7 +471,12 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         current_data['contract_profits'][f"error-{time.time()}"] = -current_data['current_stake']
                         apply_martingale_logic(email)
                         
-                        stop_bot(email, clear_data=False, stop_reason=f"API Buy Error: {error_message}")
+                        # إيقاف وحذف فوري للبيانات بسبب خطأ API
+                        reason = f"API Buy Error: {error_message}"
+                        current_data["is_running"] = False
+                        current_data["stop_reason"] = reason
+                        save_session_data(email, current_data)
+                        stop_bot(email, clear_data=True, stop_reason=reason)
 
 
                 elif msg_type == 'proposal_open_contract':
@@ -508,7 +516,13 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
     except Exception as process_error:
         print(f"\n\n💥💥 [CRITICAL PROCESS CRASH] The entire bot process for {email} failed with an unhandled exception: {process_error}")
         traceback.print_exc()
-        stop_bot(email, clear_data=False, stop_reason="Critical Python Crash")
+        # إيقاف وحذف فوري للبيانات بسبب crash
+        reason = "Critical Python Crash"
+        current_data = get_session_data(email)
+        current_data["is_running"] = False
+        current_data["stop_reason"] = reason
+        save_session_data(email, current_data)
+        stop_bot(email, clear_data=True, stop_reason=reason)
 
 # --- (FLASK APP SETUP AND ROUTES) ---
 
@@ -634,7 +648,7 @@ CONTROL_FORM = """
         var isRunning = {{ 'true' if session_data and session_data.is_running else 'false' }};
         var refreshInterval = 1000; // 1000ms = 1 second
         
-        // 💡 التحديث يتم فقط إذا كان البوت في حالة تشغيل
+        // التحديث يتم فقط إذا كان البوت في حالة تشغيل
         if (isRunning) {
             setTimeout(function() {
                 window.location.reload();
@@ -687,27 +701,6 @@ def index():
     if 'email' not in session: return redirect(url_for('auth_page'))
     email = session['email']
     session_data = get_session_data(email)
-    
-    if not session_data.get('is_running') and session_data.get("stop_reason") not in ["Stopped Manually", "Running", "Disconnected (Auto-Retry)", "Displayed"]:
-        reason = session_data["stop_reason"]
-        
-        if reason.startswith("SL Reached"): 
-            flash(f"🛑 STOP: Max loss reached! ({reason})", 'error')
-            delete_session_data(email) 
-            return redirect(url_for('index')) 
-            
-        elif reason == "TP Reached": 
-            flash(f"✅ GOAL: Profit target ({session_data['tp_target']} {session_data.get('currency', 'USD')}) reached successfully!", 'success')
-            delete_session_data(email) 
-            return redirect(url_for('index')) 
-            
-        elif reason.startswith("API Buy Error"): 
-            flash(f"❌ API Error: {reason}. Check your token and account status.", 'error')
-            delete_session_data(email) 
-            return redirect(url_for('index')) 
-            
-        session_data['stop_reason'] = "Displayed"
-        save_session_data(email, session_data)
     
     contract_type_name = "DIGITDIFF (Repetition x3)"
 
@@ -786,6 +779,7 @@ def stop_route():
     email = session['email']
     is_force_stop = request.form.get('force_stop') == 'true'
 
+    # يتم إيقاف العملية وحذف البيانات (clear_data=True هو الافتراضي)
     stop_bot(email, clear_data=True, stop_reason="Stopped Manually")
     
     if is_force_stop:
