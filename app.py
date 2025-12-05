@@ -16,7 +16,7 @@ from collections import Counter
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100" 
-DURATION = 5             # مدة الصفقة 5 تيك (تم التعديل)
+DURATION = 4             # مدة الصفقة 5 تيك (تم التعديل)
 DURATION_UNIT = "t"   
 
 # 💡 إعدادات التحليل 
@@ -43,11 +43,11 @@ TRADE_LOCK = Lock()
 
 DEFAULT_SESSION_STATE = {
     "api_token": "",
-    "base_stake": 0.35,              
+    "base_stake": 1.0,              
     "tp_target": 10.0,
     "is_running": False,
     "current_profit": 0.0,
-    "current_stake": 0.35,            
+    "current_stake": 1.0,            
     "consecutive_losses": 0,
     "current_step": 0,
     "total_wins": 0,
@@ -416,10 +416,10 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         # seconds = tick_time_epoch % 60 # تم إلغاء شرط الوقت
 
                         # 💡 الشرط الجديد: إذا كان الرقم الأخير 5
-                        if T_new == 5:
+                        if T_new == 7:
                             
                             # الإشارة موجودة، الحاجز هو 5
-                            barrier_to_use = 5
+                            barrier_to_use = 7
                             
                             print(f"✅ [SIGNAL - DIGIT 5] T: {T_new}. Entering Diff 5 at epoch {tick_time_epoch}.")
                         
