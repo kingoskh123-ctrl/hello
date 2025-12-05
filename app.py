@@ -13,7 +13,7 @@ from threading import Lock
 # BOT CONSTANT SETTINGS (R_100 | x29 | انتظار الثانية 0)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL = "BULLUSD"               
+SYMBOL = "BULLMARKET"               
 DURATION = 5                   
 DURATION_UNIT = "t"
 
