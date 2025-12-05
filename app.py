@@ -20,8 +20,8 @@ DURATION = 1           # مدة الصفقة 1 تيك
 DURATION_UNIT = "t"    
 
 # إعدادات المضاعفة والتحليل
-TICK_SAMPLE_SIZE = 3             
-MAX_CONSECUTIVE_LOSSES = 2       
+TICK_SAMPLE_SIZE = 5             # 💡 تم التعديل إلى 5 تيكات
+MAX_CONSECUTIVE_LOSSES = 1       
 MARTINGALE_MULTIPLIER = 14.0     
 MAX_MARTINGALE_STEP = 1          
 
@@ -61,7 +61,7 @@ DEFAULT_SESSION_STATE = {
     "open_contract_ids": [],                 
     "contract_profits": {},                  
     "last_two_digits": [9, 9],
-    "last_digits_history": [9, 9, 9],
+    "last_digits_history": [9, 9, 9, 9, 9], # 💡 تم التعديل إلى 5 عناصر
     "last_trade_barrier": 9 
 }
 
@@ -87,7 +87,7 @@ def get_session_data(email):
         data = all_sessions[email]
         for key, default_val in DEFAULT_SESSION_STATE.items():
             if key not in data: data[key] = default_val
-        # ضمان أن تاريخ التيكات يحتوي على 3 عناصر
+        # ضمان أن تاريخ التيكات يحتوي على 5 عناصر
         if 'last_digits_history' not in data or len(data['last_digits_history']) != TICK_SAMPLE_SIZE: 
              data['last_digits_history'] = [9] * TICK_SAMPLE_SIZE 
         return data
@@ -224,6 +224,12 @@ def apply_martingale_logic(email):
         
         if current_data['consecutive_losses'] > MAX_CONSECUTIVE_LOSSES:
             # SL Reached - Stop and reset
+            
+            # 💡 تصفير حالة المضاعفة قبل الإيقاف الفعلي (يحل مشكلة استئناف الـ Stake الأساسي)
+            current_data['current_stake'] = current_data['base_stake']
+            current_data['consecutive_losses'] = 0
+            current_data['current_step'] = 0
+            
             save_session_data(email, current_data)
             stop_bot(email, clear_data=True, stop_reason="SL Reached: Consecutive losses")
             return
@@ -247,8 +253,6 @@ def apply_martingale_logic(email):
         # 4. Send the immediate trade
         if send_single_digitdiff_order(email, new_stake, currency_to_use, barrier_to_use):
             
-            # (لا يوجد حذف لسجل التيكات هنا - المضاعفة الفورية)
-            
             # Set is_contract_open to True to block tick entry and wait for settlement
             is_contract_open[email] = True
             current_data['last_entry_time'] = int(time.time())
@@ -269,7 +273,7 @@ def apply_martingale_logic(email):
         entry_result_tag = "WIN"
         print(f"✅ [ENTRY RESULT] {entry_result_tag}. PnL: {total_profit_loss:.2f}. Stake reset to base: {base_stake_used:.2f}.")
         
-        # 💡 التعديل المطلوب: مسح سجل التيكات بعد الربح
+        # 💡 مسح سجل التيكات بعد الربح
         current_data['last_digits_history'] = [9] * TICK_SAMPLE_SIZE
         
         # Reset contract state and allow the next tick signal to enter
@@ -309,20 +313,34 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
     active_ws = {email: None}
 
     session_data = get_session_data(email)
+    
+    # 💡 التعديل: تصفير حالة الخسارة والمضاعفة عند محاولة التشغيل بعد SL
+    if session_data.get('consecutive_losses', 0) > MAX_CONSECUTIVE_LOSSES:
+        session_data['consecutive_losses'] = 0
+        session_data['current_step'] = 0
+        session_data['current_stake'] = stake # يتم استخدام الـ stake الأساسي من الفورم
+        session_data['stop_reason'] = "SL State Cleared"
+        print("⚠️ [RESUME FIX] Resetting Martingale/Loss state after detecting previous SL breach.")
+    
+    initial_stake = session_data.get('current_stake', stake)
+    if session_data.get('consecutive_losses') == 0:
+        initial_stake = stake
+
     session_data.update({
         "api_token": token, "base_stake": stake, "tp_target": tp, "is_running": True, 
-        "current_stake": stake, "stop_reason": "Running", "last_entry_time": 0,
+        "current_stake": initial_stake, 
+        "stop_reason": "Running", "last_entry_time": 0,
         "last_entry_price": 0.0, "last_tick_data": None, "currency": currency,
         "account_type": account_type, "last_valid_tick_price": 0.0,
         "current_entry_id": None, "open_contract_ids": [], "contract_profits": {},
         "last_two_digits": [9, 9],
-        "last_digits_history": [9] * TICK_SAMPLE_SIZE
+        "last_digits_history": [9] * TICK_SAMPLE_SIZE # يتم التأكد من أن الحجم هو 5
     })
     save_session_data(email, session_data)
 
-    if session_data['consecutive_losses'] > 0:
+    if session_data.get('consecutive_losses', 0) > 0:
         print("🔍 [RECOVERY] Resuming in Martingale mode. Waiting for next signal.")
-        is_contract_open[email] = False # يجب أن ينتظر إشارة دخول جديدة عند إعادة الاتصال
+        is_contract_open[email] = False 
 
     try:
         while True:
@@ -352,8 +370,8 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                                 "subscribe": 1  
                             }))
                 
-                elif current_data['consecutive_losses'] > 0:
-                    print("🔥 [RESUME MARTINGALE] Waiting for 3-tick entry signal.")
+                elif current_data.get('consecutive_losses', 0) > 0:
+                    print(f"🔥 [RESUME MARTINGALE] Waiting for {TICK_SAMPLE_SIZE}-tick entry signal.")
                     is_contract_open[email] = False
                 else:
                     is_contract_open[email] = False 
@@ -373,7 +391,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         
                     T_new = int(str(current_price)[-1]) # الرقم الأخير للتيك الجديد
                     
-                    # 💡 تحديث: يتم حفظ آخر 3 تيكات
+                    # 💡 تحديث: يتم حفظ آخر 5 تيكات
                     history = current_data.get('last_digits_history', [9] * TICK_SAMPLE_SIZE)
                     history.insert(0, T_new) 
                     current_data['last_digits_history'] = history[:TICK_SAMPLE_SIZE] 
@@ -382,19 +400,22 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         save_session_data(email, current_data)
                         return
 
-                    # T1: الأحدث (التيك الثالث) / T3: الأقدم (التيك الأول)
+                    # T1: الأحدث (index 0)
+                    # T3: index 2
+                    # T5: الأقدم (index 4)
                     T1 = current_data['last_digits_history'][0]
                     T3 = current_data['last_digits_history'][2] 
+                    T5 = current_data['last_digits_history'][4] 
                     
                     current_data['last_valid_tick_price'] = current_price
                     current_data['last_tick_data'] = data['tick']
                     
                     
-                    # 2. التحقق من شرط الدخول (3 تيك، شرط T1 = T3)
+                    # 2. التحقق من شرط الدخول (5 تيك، شرط T1=T3=T5)
                     if not is_contract_open.get(email):
                         
-                        # 💡 شرط الدخول الجديد: T1 (الأحدث) يجب أن يساوي T3 (الأقدم)
-                        condition_met = (T1 == T3)
+                        # 💡 شرط الدخول الجديد: T1=T3 و T1=T5
+                        condition_met = (T1 == T3) and (T1 == T5)
                         
                         if condition_met:
                             
@@ -402,16 +423,18 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                             barrier_digit = T1 
 
                             entry_mode = "Initial Trade"
-                            if current_data['consecutive_losses'] > 0:
+                            if current_data.get('consecutive_losses', 0) > 0:
                                 entry_mode = f"Martingale Step {current_data['current_step']}"
                                 
-                            print(f"📊 [ENTRY CONDITION MET] T1={T1}, T3={T3}. Entering Single DIGITDIFF {barrier_digit}. ({entry_mode})")
+                            print(f"📊 [ENTRY CONDITION MET] T1={T1}, T3={T3}, T5={T5}. Entering Single DIGITDIFF {barrier_digit}. ({entry_mode})")
                             
                             # --- منطق بدء الصفقة الجديدة ---
                             stake = current_data['current_stake']
                             currency_to_use = current_data['currency']
                             
-                            if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES:
+                            # 💡 التحقق مرة أخرى من SL قبل إرسال الصفقة 
+                            if current_data.get('consecutive_losses', 0) >= MAX_CONSECUTIVE_LOSSES:
+                                print("❌ [SL GUARD] Preventing trade as consecutive losses limit was reached internally.")
                                 stop_bot(email, clear_data=True, stop_reason=f"SL Reached: Max {MAX_CONSECUTIVE_LOSSES} Consecutive Losses reached.")
                                 save_session_data(email, current_data)
                                 return
@@ -422,8 +445,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                             current_data['last_trade_barrier'] = barrier_digit # حفظ الحاجز
 
                             if send_single_digitdiff_order(email, stake, currency_to_use, barrier_digit):
-                                
-                                # (لا يوجد حذف لسجل التيكات هنا - الحذف يتم فقط بعد معرفة نتيجة الصفقة في apply_martingale_logic)
                                 pass
                                 
                             is_contract_open[email] = True
@@ -569,7 +590,7 @@ CONTROL_FORM = """
 
 {% if session_data and session_data.is_running %}
     {# 💡 تحديث وصف الاستراتيجية #}
-    {% set strategy = 'Single DigitDiff | Entry: T1 = T3 (3 Ticks Analysis) | Immediate Martingale on Loss | x' + martingale_multiplier|string + ' Martingale, Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string %}
+    {% set strategy = 'Single DigitDiff | Entry: T1=T3=T5 (5 Ticks Analysis) | Immediate Martingale on Loss | x' + martingale_multiplier|string + ' Martingale, Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -673,7 +694,7 @@ def index():
     email = session['email']
     session_data = get_session_data(email)
 
-    if not session_data.get('is_running') and "stop_reason" in session_data and session_data["stop_reason"] not in ["Stopped Manually", "Running", "Disconnected (Auto-Retry)", "Displayed"]:
+    if not session_data.get('is_running') and "stop_reason" in session_data and session_data["stop_reason"] not in ["Stopped Manually", "Running", "Disconnected (Auto-Retry)", "Displayed", "SL State Cleared"]:
         reason = session_data["stop_reason"]
         
         if reason.startswith("SL Reached"): flash(f"🛑 STOP: Max loss reached! ({reason})", 'error')
@@ -683,7 +704,7 @@ def index():
         session_data['stop_reason'] = "Displayed"
         save_session_data(email, session_data)
     
-    contract_type_name = "Single DigitDiff (T1=T3)"
+    contract_type_name = "Single DigitDiff (T1=T3=T5)"
 
     return render_template_string(CONTROL_FORM,
         email=email,
@@ -735,15 +756,26 @@ def start_bot():
     try:
         account_type = request.form['account_type']
         currency = "USD" if account_type == 'demo' else "tUSDT"
-        current_data = get_session_data(email)
-        token = request.form['token'] if not current_data.get('api_token') or request.form.get('token') != current_data['api_token'] else current_data['api_token']
+        token = request.form['token']
         stake = float(request.form['stake'])
         if stake < 0.35: raise ValueError("Stake too low")
         tp = float(request.form['tp'])
     except ValueError:
         flash("Invalid stake or TP value (Base Stake must be >= 0.35).", 'error')
         return redirect(url_for('index'))
-        
+    
+    current_data = get_session_data(email)
+    
+    if current_data.get('stop_reason') == "SL Reached: Consecutive losses" or current_data.get('consecutive_losses', 0) > MAX_CONSECUTIVE_LOSSES:
+        print(f"⚠️ [SL DETECTED] Resetting state before starting after SL was hit.")
+        current_data['consecutive_losses'] = 0
+        current_data['current_step'] = 0
+        current_data['current_stake'] = stake 
+        current_data['stop_reason'] = "SL State Cleared" 
+        save_session_data(email, current_data)
+        flash("🛑 تم إيقاف البوت مسبقًا بسبب تجاوز حد الخسارة (Stop Loss). تمت إعادة ضبط حالته إلى الأساس لبدء جولة جديدة.", 'error')
+
+
     process = Process(target=bot_core_logic, args=(email, token, stake, tp, currency, account_type))
     process.daemon = True
     process.start()
@@ -751,7 +783,7 @@ def start_bot():
     with PROCESS_LOCK: active_processes[email] = process
     
     # 💡 تحديث وصف الاستراتيجية في رسالة Flash
-    flash(f'Bot started successfully. Strategy: Single DigitDiff on T1=T3 (3 Ticks Analysis) / Immediate Martingale on Loss, with x{MARTINGALE_MULTIPLIER} Martingale (Max {MAX_CONSECUTIVE_LOSSES} Losses, Max Step {MAX_MARTINGALE_STEP})', 'success')
+    flash(f'Bot started successfully. Strategy: Single DigitDiff on T1=T3=T5 (5 Ticks Analysis) / Immediate Martingale on Loss, with x{MARTINGALE_MULTIPLIER} Martingale (Max {MAX_CONSECUTIVE_LOSSES} Losses, Max Step {MAX_MARTINGALE_STEP})', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
