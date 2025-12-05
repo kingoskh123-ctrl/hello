@@ -12,21 +12,21 @@ import traceback
 from collections import Counter
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (R_100 | Single Digit Diff | Conditional Martingale)
+# BOT CONSTANT SETTINGS (R_100 | Digit Repetition x3 Ticks | Conditional Martingale)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100" 
-DURATION = 4             # مدة الصفقة 5 تيك (تم التعديل)
-DURATION_UNIT = "t"   
+DURATION = 1              # مدة الصفقة 1 تيك (تم التعديل)
+DURATION_UNIT = "t"       # الوحدة بالتيكات (تم التعديل)
 
-# 💡 إعدادات التحليل 
-TICK_SAMPLE_SIZE = 1    
-MIN_REPETITION_COUNT = 0    
+# 💡 إعدادات تحليل التيكات الجديدة
+TICK_SAMPLE_SIZE = 3      # عدد التيكات المطلوبة لتكوين الإشارة (تم التعديل)
+MIN_REPETITION_COUNT = 3  # يجب أن تتكرر 3 مرات (تم التعديل)
 
-# إعدادات المضاعفة
-MAX_CONSECUTIVE_LOSSES = 2   
-MARTINGALE_MULTIPLIER = 14.0  
-MAX_MARTINGALE_STEP = 1     
+# إعدادات المضاعفة (تم الاحتفاظ بها)
+MAX_CONSECUTIVE_LOSSES = 2    # أقصى خسائر متتالية مسموح بها
+MARTINGALE_MULTIPLIER = 14.0   # مضاعف الخسارة
+MAX_MARTINGALE_STEP = 1       # أقصى خطوة مضاعفة (3 خسائر متتالية)
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
@@ -43,11 +43,11 @@ TRADE_LOCK = Lock()
 
 DEFAULT_SESSION_STATE = {
     "api_token": "",
-    "base_stake": 1.0,              
+    "base_stake": 0.35,              
     "tp_target": 10.0,
     "is_running": False,
     "current_profit": 0.0,
-    "current_stake": 1.0,            
+    "current_stake": 0.35,            
     "consecutive_losses": 0,
     "current_step": 0,
     "total_wins": 0,
@@ -63,11 +63,19 @@ DEFAULT_SESSION_STATE = {
     "current_entry_id": None,             
     "open_contract_ids": [],              
     "contract_profits": {},               
-    "last_digits_history": [9] * TICK_SAMPLE_SIZE, 
-    "last_barrier_digit": None 
+    
+    # 💡 متغيرات الحالة المعاد تنشيطها لتحليل التيكات
+    "last_digits_history": [9] * TICK_SAMPLE_SIZE, # سجل آخر 3 أرقام
+    "last_barrier_digit": None, 
+    
+    # متغيرات الشموع القديمة التي سيتم تجاهلها
+    "current_ohlc_ticks": 0,
+    "current_ohlc_open_price": 0.0,
+    "ohlc_history": [],
+    "last_trade_direction": None,
 }
 
-# --- Persistence functions ---
+# --- Persistence functions (No change needed) ---
 def load_persistent_sessions():
     if not os.path.exists(ACTIVE_SESSIONS_FILE): return {}
     try:
@@ -89,7 +97,8 @@ def get_session_data(email):
         data = all_sessions[email]
         for key, default_val in DEFAULT_SESSION_STATE.items():
             if key not in data: data[key] = default_val
-        # 💡 نضمن أن حجم سجل التيكات هو 1 لهذا المنطق
+        
+        # 💡 ضبط حجم سجل التيكات
         if 'last_digits_history' not in data or len(data['last_digits_history']) != TICK_SAMPLE_SIZE: 
              data['last_digits_history'] = [9] * TICK_SAMPLE_SIZE
         if 'last_barrier_digit' not in data:
@@ -141,8 +150,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     if email in is_contract_open: is_contract_open[email] = False
 
     if clear_data:
-        # عند الوقف التلقائي (SL/TP/API Error)، نترك البيانات محفوظة مؤقتاً لـ Flask index لتقوم بحذفها وإعادة التوجيه
-        if stop_reason in ["SL Reached: Consecutive losses", "TP Reached", "API Buy Error"]:
+        if stop_reason in ["SL Reached: Max 4 consecutive losses", "TP Reached", "API Buy Error"]:
             print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}). Data kept temporarily for display.")
         else:
             delete_session_data(email)
@@ -160,10 +168,8 @@ def calculate_martingale_stake(base_stake, current_step, multiplier):
     if current_step == 0:  
         return base_stake
     
-    if current_step == 1:
-        return base_stake * multiplier
-        
-    return base_stake 
+    # يتم مضاعفة الـ Stake في كل خطوة
+    return base_stake * (multiplier ** current_step)
 
 
 def send_single_trade_order(email, stake, currency, contract_type, barrier):
@@ -183,10 +189,10 @@ def send_single_trade_order(email, stake, currency, contract_type, barrier):
             "basis": "stake",
             "contract_type": contract_type, 
             "currency": currency,
-            "duration": DURATION, # تم التعديل إلى 5
+            "duration": DURATION, 
             "duration_unit": DURATION_UNIT,
             "symbol": SYMBOL,
-            "barrier": barrier 
+            "barrier": barrier # 💡 إعادة إضافة الحاجز
         }
     }
     try:
@@ -199,7 +205,7 @@ def send_single_trade_order(email, stake, currency, contract_type, barrier):
 
 
 def apply_martingale_logic(email):
-    """ منطق المضاعفة (Single Trade Martingale) """
+    """ منطق المضاعفة """
     global is_contract_open, MARTINGALE_MULTIPLIER, MAX_CONSECUTIVE_LOSSES, MAX_MARTINGALE_STEP
     current_data = get_session_data(email)
     
@@ -227,7 +233,7 @@ def apply_martingale_logic(email):
         
         if current_data['consecutive_losses'] > MAX_CONSECUTIVE_LOSSES:
             save_session_data(email, current_data)
-            stop_bot(email, clear_data=False, stop_reason=f"SL Reached: Consecutive losses") 
+            stop_bot(email, clear_data=False, stop_reason=f"SL Reached: Max {MAX_CONSECUTIVE_LOSSES} consecutive losses") 
             return
             
         current_data['current_step'] = min(current_data['current_step'] + 1, MAX_MARTINGALE_STEP)
@@ -235,19 +241,23 @@ def apply_martingale_logic(email):
         new_stake = calculate_martingale_stake(base_stake_used, current_data['current_step'], MARTINGALE_MULTIPLIER)
         current_data['current_stake'] = new_stake
         
-        print(f"🔄 [LOSS - MARTINGALE] PnL: {total_profit_loss:.2f}. Con. Loss: {current_data['consecutive_losses']}/{MAX_CONSECUTIVE_LOSSES}. Step: {current_data['current_step']}/{MAX_MARTINGALE_STEP}. Next Stake calculated: {round(new_stake, 2):.2f}. (Waiting for new signal: Digit 5).")
+        barrier_tag = current_data.get('last_barrier_digit', 'N/A')
+        print(f"🔄 [LOSS - MARTINGALE] PnL: {total_profit_loss:.2f}. Con. Loss: {current_data['consecutive_losses']}/{MAX_CONSECUTIVE_LOSSES}. Next Stake calculated: {round(new_stake, 2):.2f}. Retrying Diff {barrier_tag}...")
         
+        # 💡 يتم الدخول فورا بنفس الرقم (سيتم تنفيذه في on_message_wrapper عند أول تيك قادم)
+
     # ✅ حالة الربح (Win)
     else: 
         current_data['total_wins'] += 1 
         current_data['current_step'] = 0 
         current_data['consecutive_losses'] = 0
         current_data['current_stake'] = base_stake_used
-        # عند الربح، نطلب البحث عن إشارة جديدة
-        current_data['last_barrier_digit'] = None 
+        current_data['last_barrier_digit'] = None # إعادة تعيين الحاجز عند الربح
+        # 💡 مسح سجل التيكات عند الربح لإعادة البحث عن إشارة جديدة
+        current_data['last_digits_history'] = [9] * TICK_SAMPLE_SIZE
         entry_result_tag = "WIN"
         
-        print(f"✅ [ENTRY RESULT] {entry_result_tag}. PnL: {total_profit_loss:.2f}. Stake reset to base: {base_stake_used:.2f}.")
+        print(f"✅ [ENTRY RESULT] {entry_result_tag}. PnL: {total_profit_loss:.2f}. Stake reset to base: {base_stake_used:.2f}. Waiting for new signal.")
 
     # مسح بيانات العقد وإعادة فتح الباب للدخول
     current_data['current_entry_id'] = None
@@ -284,32 +294,26 @@ def start_new_diff_trade(email, repeated_digit):
     currency_to_use = current_data['currency']
     
     if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES:
-         stop_bot(email, clear_data=False, stop_reason=f"SL Reached: Consecutive losses") 
+         stop_bot(email, clear_data=False, stop_reason=f"SL Reached: Max {MAX_CONSECUTIVE_LOSSES} consecutive losses") 
          return
     
     
-    if repeated_digit is not None: 
-        # repeated_digit هنا هو 5
-        barrier_to_use = repeated_digit 
-        entry_mode_tag = "Base Stake" if current_data['consecutive_losses'] == 0 else f"Martingale Step {current_data['current_step']}"
-        entry_source = f"{entry_mode_tag} (Signal: Tick Digit 5)"
-    else:
-        return # يجب أن يكون هناك إشارة
+    barrier_to_use = repeated_digit 
+    entry_mode_tag = "Base Stake" if current_data['consecutive_losses'] == 0 else f"Martingale Step {current_data['current_step']}"
+    entry_source = f"{entry_mode_tag} (Signal: {TICK_SAMPLE_SIZE}x Digit {repeated_digit})"
 
     current_data['current_entry_id'] = time.time()
     current_data['open_contract_ids'] = []
     current_data['contract_profits'] = {}
     
     contract_type = "DIGITDIFF"
-    barrier = barrier_to_use # barrier هو 5
+    barrier = barrier_to_use 
     
     print(f"🧠 [SINGLE ENTRY - {entry_mode_tag}] Source: {entry_source}. Stake: {round(stake, 2):.2f}. Barrier: {barrier}. (Diff {barrier}).")
     
     if send_single_trade_order(email, stake, currency_to_use, contract_type, barrier): 
         
-        # حفظ الحاجز 
         current_data['last_barrier_digit'] = barrier
-        # 💡 لا نحتاج لمسح تاريخ التيكات
         
         is_contract_open[email] = True 
 
@@ -328,20 +332,20 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
     
     print(f"🚀🚀 [CORE START] Bot logic started for {email}. Checking settings...") 
     
-    global is_contract_open, active_ws, TICK_SAMPLE_SIZE
+    global is_contract_open, active_ws
 
     is_contract_open = {email: False}
     active_ws = {email: None}
 
     session_data = get_session_data(email)
-    # 💡 يتم تحديث حجم سجل التيكات هنا إلى 1
     session_data.update({
         "api_token": token, "base_stake": stake, "tp_target": tp, "is_running": True, 
         "current_stake": stake, "stop_reason": "Running", "last_entry_time": 0,
         "last_entry_price": 0.0, "last_tick_data": None, "currency": currency,
         "account_type": account_type, "last_valid_tick_price": 0.0,
         "current_entry_id": None, "open_contract_ids": [], "contract_profits": {},
-        "last_digits_history": [9] * TICK_SAMPLE_SIZE, # حجمه 1
+        "last_digits_history": [9] * TICK_SAMPLE_SIZE, # إعادة ضبط سجل التيكات
+        "last_barrier_digit": None,
     })
     
     if session_data['consecutive_losses'] > 0:
@@ -349,7 +353,8 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         current_stake = calculate_martingale_stake(stake, step, MARTINGALE_MULTIPLIER)
         session_data['current_stake'] = current_stake
         session_data['current_step'] = step
-        print(f"🔍 [RECOVERY] Resuming in Martingale mode (Step {step}). Stake: {current_stake:.2f}. Waiting for signal (Digit 5).")
+        barrier_tag = session_data.get('last_barrier_digit', 'N/A')
+        print(f"🔍 [RECOVERY] Resuming in Martingale mode (Step {step}). Stake: {current_stake:.2f}. Waiting for signal or re-entry for Diff {barrier_tag}.")
     else:
         session_data['last_barrier_digit'] = None 
 
@@ -366,12 +371,16 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
             def on_open_wrapper(ws_app):
                 current_data = get_session_data(email) 
                 ws_app.send(json.dumps({"authorize": current_data['api_token']}))
-                ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
+                
+                # 💡 نطلب التيكات مباشرة
+                ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1})) 
+                
                 running_data = get_session_data(email)
                 running_data['is_running'] = True
                 save_session_data(email, running_data)
                 print(f"✅ [PROCESS] Connection established for {email}.")
                 
+                # منطق استعادة العقود المفتوحة
                 if current_data['open_contract_ids']:
                     print(f"🔍 [RECOVERY CHECK] Found {len(current_data['open_contract_ids'])} contracts pending settlement. RE-SUBSCRIBING...")
                     is_contract_open[email] = True
@@ -395,38 +404,48 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                 if msg_type == 'tick':
                     try:
                         current_price = float(data['tick']['quote'])
-                        tick_time_epoch = int(data['tick']['epoch']) # جلب وقت التيك
-                    except (KeyError, ValueError):
-                        return
+                        tick_time_epoch = int(data['tick']['epoch'])
+                    except (KeyError, ValueError): return
                         
-                    T_new = int(str(current_price)[-1])
-                    
-                    # 💡 لا نحتاج سجل تاريخ التيكات، نحدث آخر سعر وتيك
+                    T_new = int(str(current_price)[-1]) # الرقم الأخير
+
                     current_data['last_valid_tick_price'] = current_price
                     current_data['last_tick_data'] = data['tick']
-                    current_data['last_digits_history'][0] = T_new 
+
+                    # 1. تحديث سجل الأرقام الأخيرة
+                    current_data['last_digits_history'].append(T_new)
+                    current_data['last_digits_history'] = current_data['last_digits_history'][-TICK_SAMPLE_SIZE:]
                     
                     
-                    # 2. التحقق من شرط الدخول (عندما يكون الرقم الأخير 5)
-                    if not is_contract_open.get(email) and current_data['consecutive_losses'] < MAX_CONSECUTIVE_LOSSES:
+                    # 2. التحقق من شرط الدخول والمضاعفة
+                    if not is_contract_open.get(email):
                         
                         barrier_to_use = None
                         
-                        # حساب الثانية الحالية من وقت التيك (المقسوم على 60)
-                        # seconds = tick_time_epoch % 60 # تم إلغاء شرط الوقت
+                        # 💡 في حالة الخسارة (المضاعفة)، ندخل مباشرة بنفس الحاجز الذي خسرنا فيه
+                        if current_data['consecutive_losses'] > 0 and current_data['last_barrier_digit'] is not None:
+                            barrier_to_use = current_data['last_barrier_digit']
+                            print(f"🔥 [MARTINGALE RE-ENTRY] Consecutive loss: {current_data['consecutive_losses']}. Re-entering Diff {barrier_to_use}.")
 
-                        # 💡 الشرط الجديد: إذا كان الرقم الأخير 5
-                        if T_new == 7:
+                        # 💡 في حالة عدم وجود خسارة متتالية (البحث عن إشارة جديدة)
+                        elif current_data['consecutive_losses'] == 0:
                             
-                            # الإشارة موجودة، الحاجز هو 5
-                            barrier_to_use = 7
-                            
-                            print(f"✅ [SIGNAL - DIGIT 5] T: {T_new}. Entering Diff 5 at epoch {tick_time_epoch}.")
+                            # شرط الإشارة: تكرار الرقم 3 مرات
+                            if len(current_data['last_digits_history']) == TICK_SAMPLE_SIZE:
+                                history = current_data['last_digits_history']
+                                first_digit = history[0]
+                                
+                                # التحقق: هل كل الأرقام الثلاثة متطابقة؟
+                                is_consecutive = all(d == first_digit for d in history)
+                                
+                                if is_consecutive:
+                                    barrier_to_use = first_digit
+                                    print(f"🔥 [SIGNAL FOUND] {TICK_SAMPLE_SIZE}x Digit {first_digit}. Entering Diff {first_digit}.")
+                                
                         
                         if barrier_to_use is not None:
-                            # الدخول بالـ Stake الحالي (سواء الأساسي أو المضاعف) والحاجز 5
+                            # الدخول بالـ Stake الحالي (سواء الأساسي أو المضاعف) والحاجز المحدد
                             start_new_diff_trade(email, repeated_digit=barrier_to_use)
-                            current_data = get_session_data(email) 
                             
                     save_session_data(email, current_data)
 
@@ -445,10 +464,10 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         time.sleep(1) 
                         is_contract_open[email] = False 
                         
+                        # تسجيل الخسارة وتطبيق المضاعفة
                         current_data['contract_profits'][f"error-{time.time()}"] = -current_data['current_stake']
                         apply_martingale_logic(email)
                         
-                        # هنا يتم وقف البوت في الـ Multiprocess
                         stop_bot(email, clear_data=False, stop_reason=f"API Buy Error: {error_message}")
 
 
@@ -563,7 +582,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = 'Conditional Martingale (x' + martingale_multiplier|string + ') | Entry: DIGITDIFF (5 Ticks) on Tick Digit 5 | Barrier: 5' %}
+    {% set strategy = 'Conditional Martingale (x' + martingale_multiplier|string + ') | Entry: ' + tick_sample_size|string + 'x Digit Repetition | Contract: DIGITDIFF | Duration: ' + duration|string + ' Tick' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -669,30 +688,28 @@ def index():
     email = session['email']
     session_data = get_session_data(email)
     
-    # 💡 منطق التحقق من الوقف التلقائي وإعادة التوجيه (لضمان مسح البيانات بعد SL/TP)
     if not session_data.get('is_running') and session_data.get("stop_reason") not in ["Stopped Manually", "Running", "Disconnected (Auto-Retry)", "Displayed"]:
         reason = session_data["stop_reason"]
         
         if reason.startswith("SL Reached"): 
             flash(f"🛑 STOP: Max loss reached! ({reason})", 'error')
-            delete_session_data(email) # 🗑️ مسح البيانات بالكامل
-            return redirect(url_for('index')) # إعادة توجيه لعرض صفحة الإعدادات
+            delete_session_data(email) 
+            return redirect(url_for('index')) 
             
         elif reason == "TP Reached": 
             flash(f"✅ GOAL: Profit target ({session_data['tp_target']} {session_data.get('currency', 'USD')}) reached successfully!", 'success')
-            delete_session_data(email) # 🗑️ مسح البيانات بالكامل
-            return redirect(url_for('index')) # إعادة توجيه لعرض صفحة الإعدادات
+            delete_session_data(email) 
+            return redirect(url_for('index')) 
             
         elif reason.startswith("API Buy Error"): 
             flash(f"❌ API Error: {reason}. Check your token and account status.", 'error')
-            delete_session_data(email) # 🗑️ مسح البيانات بالكامل
-            return redirect(url_for('index')) # إعادة توجيه لعرض صفحة الإعدادات
+            delete_session_data(email) 
+            return redirect(url_for('index')) 
             
-        # إذا لم يكن أحد الأسباب أعلاه (قد يكون سبب قديم تم عرضه سابقاً)
         session_data['stop_reason'] = "Displayed"
         save_session_data(email, session_data)
     
-    contract_type_name = "Single DIGITDIFF"
+    contract_type_name = "DIGITDIFF (Repetition x3)"
 
     return render_template_string(CONTROL_FORM,
         email=email,
@@ -700,7 +717,6 @@ def index():
         max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
         martingale_multiplier=MARTINGALE_MULTIPLIER, 
         max_martingale_step=MAX_MARTINGALE_STEP,
-        min_repetition_count=MIN_REPETITION_COUNT,
         duration=DURATION,
         tick_sample_size=TICK_SAMPLE_SIZE,
         symbol=SYMBOL,
@@ -739,7 +755,6 @@ def start_bot():
                 flash('Bot is already running. Please stop it manually first.', 'info')
                 return redirect(url_for('index'))
             else:
-                   # تنظيف أي عملية غير حية عالقة
                  del active_processes[email]
 
     try:
@@ -760,7 +775,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    strategy_desc = f'Conditional Martingale (x{MARTINGALE_MULTIPLIER}) | Entry: DIGITDIFF ({DURATION} Ticks) on Tick Digit 5 | Barrier: 5.'
+    strategy_desc = f'Conditional Martingale (x{MARTINGALE_MULTIPLIER}, Max Loss {MAX_CONSECUTIVE_LOSSES}) | Entry: {TICK_SAMPLE_SIZE}x Digit Repetition | Contract: DIGITDIFF (1 Tick)'
     flash(f'Bot started successfully. Strategy: {strategy_desc}', 'success')
     return redirect(url_for('index'))
 
@@ -788,7 +803,6 @@ def logout():
 
 
 if __name__ == '__main__':
-    # عند البدء، نوقف أي عملية سابقة عالقة ونمسح بياناتها
     all_sessions = load_persistent_sessions()
     for email in list(all_sessions.keys()):
         delete_session_data(email)
