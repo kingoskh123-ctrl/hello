@@ -12,19 +12,19 @@ import traceback
 from collections import Counter
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (R_100 | Rise/Fall | Immediate Reversed Martingale x2.2 | 20 Ticks/4 Candles)
+# BOT CONSTANT SETTINGS (R_100 | Rise/Fall | Immediate Reversed Martingale x2.2 | 15 Ticks/3 Candles)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"      
-DURATION = 5           # 💡 التعديل: مدة الصفقة 5 تيك
+DURATION = 5           
 DURATION_UNIT = "t"    
 
 # إعدادات المضاعفة والتحليل
-TICK_SAMPLE_SIZE = 20            
-CANDLE_SIZE = 5                  
-MAX_CONSECUTIVE_LOSSES = 4       # 💡 التعديل: الحد الأقصى للخسائر 4
-MARTINGALE_MULTIPLIER = 2.2      # 💡 التعديل: المضاعف x2.2
-MAX_MARTINGALE_STEP = 4          # 💡 التعديل: الحد الأقصى لخطوات المضاعفة 4
+TICK_SAMPLE_SIZE = 15            # 💡 التعديل: تحليل 15 تيك
+CANDLE_SIZE = 5                  # 💡 التعديل: كل شمعة 5 تيكات (15/3)
+MAX_CONSECUTIVE_LOSSES = 4       
+MARTINGALE_MULTIPLIER = 2.2      
+MAX_MARTINGALE_STEP = 4          
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
@@ -62,7 +62,7 @@ DEFAULT_SESSION_STATE = {
     "open_contract_ids": [],                 
     "contract_profits": {},                  
     "last_trade_direction": "FALL",        
-    "tick_prices_history": [0.0] * TICK_SAMPLE_SIZE, 
+    "tick_prices_history": [0.0] * TICK_SAMPLE_SIZE, # 💡 الآن يتم تخزين 15 سعر
 }
 
 # --- Persistence functions ---
@@ -87,6 +87,7 @@ def get_session_data(email):
         data = all_sessions[email]
         for key, default_val in DEFAULT_SESSION_STATE.items():
             if key not in data: data[key] = default_val
+        # ضمان أن تاريخ التيكات يحتوي على 15 عنصر
         if 'tick_prices_history' not in data or len(data['tick_prices_history']) != TICK_SAMPLE_SIZE: 
              data['tick_prices_history'] = [0.0] * TICK_SAMPLE_SIZE 
         return data
@@ -386,13 +387,12 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         save_session_data(email, current_data)
                         return
 
-                    # 1. تحديد اتجاهات الشموع الأربعة (C1, C2, C3, C4)
+                    # 1. تحديد اتجاهات الشموع الثلاثة (C1, C2, C3)
                     candle_directions = []
-                    for i in range(4): # 4 شموع
+                    for i in range(3): # 3 شموع
                         start_index = i * CANDLE_SIZE
                         end_index = start_index + CANDLE_SIZE
                         
-                        # التيكات مرتبة من الأحدث (0) إلى الأقدم (19)
                         candle_prices = current_data['tick_prices_history'][start_index:end_index]
                         direction = get_candle_direction(candle_prices)
                         if direction == "FLAT":
@@ -400,20 +400,20 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                             break
                         candle_directions.append(direction)
                     
-                    # 2. التحقق من شرط الدخول (النمط المزدوج)
-                    if len(candle_directions) == 4:
-                        C1, C2, C3, C4 = candle_directions[0], candle_directions[1], candle_directions[2], candle_directions[3]
+                    # 2. التحقق من شرط الدخول (النمط المزدوج لـ 3 شموع)
+                    if len(candle_directions) == 3:
+                        C1, C2, C3 = candle_directions[0], candle_directions[1], candle_directions[2]
 
-                        # النمط الأول: Up, Down, Up, Down (C4 هو Down)
+                        # النمط الأول: Up, Down, Up (C3 هو Up)
                         pattern_1_met = (
                             C1 == "UP" and C2 == "DOWN" and 
-                            C3 == "UP" and C4 == "DOWN"
+                            C3 == "UP"
                         )
 
-                        # النمط الثاني: Down, Up, Down, Up (C4 هو Up)
+                        # النمط الثاني: Down, Up, Down (C3 هو Down)
                         pattern_2_met = (
                             C1 == "DOWN" and C2 == "UP" and 
-                            C3 == "DOWN" and C4 == "UP"
+                            C3 == "DOWN"
                         )
                         
                         pattern_met = pattern_1_met or pattern_2_met
@@ -429,13 +429,13 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         if pattern_met:
                             
                             if pattern_1_met:
-                                # C4 هو DOWN -> الدخول FALL
-                                entry_direction = "FALL" 
+                                # C3 هو UP -> الدخول RISE
+                                entry_direction = "RISE" 
                             elif pattern_2_met:
-                                # C4 هو UP -> الدخول RISE
-                                entry_direction = "RISE"
+                                # C3 هو DOWN -> الدخول FALL
+                                entry_direction = "FALL"
 
-                            print(f"📊 [ENTRY CONDITION MET] Pattern: {C1}, {C2}, {C3}, {C4}. Entering {entry_direction} (Initial Trade).")
+                            print(f"📊 [ENTRY CONDITION MET] Pattern: {C1}, {C2}, {C3}. Entering {entry_direction} (Initial Trade).")
                             
                             # --- منطق بدء الصفقة الجديدة ---
                             stake = current_data['current_stake']
@@ -596,7 +596,7 @@ CONTROL_FORM = """
 
 {% if session_data and session_data.is_running %}
     {# 💡 تحديث وصف الاستراتيجية #}
-    {% set strategy = 'Rise/Fall (5 Ticks) | Entry: Reversed Candle Pattern (2 Patterns) on 20 Ticks | Immediate REVERSED Martingale x' + martingale_multiplier|string + ' (Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string + ')' %}
+    {% set strategy = 'Rise/Fall (5 Ticks) | Entry: Reversed Candle Pattern (3 Candles) on 15 Ticks | Immediate REVERSED Martingale x' + martingale_multiplier|string + ' (Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string + ')' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -713,7 +713,7 @@ def index():
         session_data['stop_reason'] = "Displayed"
         save_session_data(email, session_data)
     
-    contract_type_name = "Rise/Fall (4 Reversed Candles, 20 Ticks)"
+    contract_type_name = "Rise/Fall (3 Reversed Candles, 15 Ticks)"
 
     return render_template_string(CONTROL_FORM,
         email=email,
@@ -792,7 +792,7 @@ def start_bot():
     with PROCESS_LOCK: active_processes[email] = process
     
     # 💡 تحديث وصف الاستراتيجية في رسالة Flash
-    flash(f'Bot started successfully. Strategy: Rise/Fall (5 Ticks) on Reversed Candle Pattern / Immediate REVERSED Martingale x{MARTINGALE_MULTIPLIER} (Max {MAX_CONSECUTIVE_LOSSES} Losses, Max Step {MAX_MARTINGALE_STEP}).', 'success')
+    flash(f'Bot started successfully. Strategy: Rise/Fall (5 Ticks) on Reversed Candle Pattern (3 Candles) / Immediate REVERSED Martingale x{MARTINGALE_MULTIPLIER} (Max {MAX_CONSECUTIVE_LOSSES} Losses, Max Step {MAX_MARTINGALE_STEP}).', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
