@@ -12,16 +12,16 @@ import traceback
 from collections import Counter
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (R_100 | Rise/Fall | Immediate Reversed Martingale x2.2 | 15 Ticks/3 Candles)
+# BOT CONSTANT SETTINGS (R_100 | Rise/Fall | Immediate Reversed Martingale x2.2 | 5 Ticks/1 Candle)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"      
 DURATION = 5           
 DURATION_UNIT = "t"    
 
-# إعدادات المضاعفة والتحليل
-TICK_SAMPLE_SIZE = 15            # 💡 التعديل: تحليل 15 تيك
-CANDLE_SIZE = 5                  # 💡 التعديل: كل شمعة 5 تيكات (15/3)
+# Martingale and Analysis Settings
+TICK_SAMPLE_SIZE = 5           
+CANDLE_SIZE = 5                  
 MAX_CONSECUTIVE_LOSSES = 4       
 MARTINGALE_MULTIPLIER = 2.2      
 MAX_MARTINGALE_STEP = 4          
@@ -62,7 +62,7 @@ DEFAULT_SESSION_STATE = {
     "open_contract_ids": [],                 
     "contract_profits": {},                  
     "last_trade_direction": "FALL",        
-    "tick_prices_history": [0.0] * TICK_SAMPLE_SIZE, # 💡 الآن يتم تخزين 15 سعر
+    "tick_prices_history": [0.0] * TICK_SAMPLE_SIZE, 
 }
 
 # --- Persistence functions ---
@@ -87,7 +87,6 @@ def get_session_data(email):
         data = all_sessions[email]
         for key, default_val in DEFAULT_SESSION_STATE.items():
             if key not in data: data[key] = default_val
-        # ضمان أن تاريخ التيكات يحتوي على 15 عنصر
         if 'tick_prices_history' not in data or len(data['tick_prices_history']) != TICK_SAMPLE_SIZE: 
              data['tick_prices_history'] = [0.0] * TICK_SAMPLE_SIZE 
         return data
@@ -157,11 +156,9 @@ def calculate_martingale_stake(base_stake, current_step, multiplier):
     return base_stake * (multiplier ** step)
 
 def get_opposite_direction(direction):
-    """ يعكس اتجاه الصفقة """
     return "FALL" if direction == "RISE" else "RISE"
 
 def send_rise_fall_order(email, stake, currency, direction):
-    """ إرسال صفقة واحدة من نوع RISE أو FALL """
     global active_ws, DURATION, DURATION_UNIT, SYMBOL
     
     if email not in active_ws or active_ws[email] is None: 
@@ -195,7 +192,6 @@ def send_rise_fall_order(email, stake, currency, direction):
 
 
 def apply_martingale_logic(email, entry_direction):
-    """ منطق تسوية العقد وتحديث حالة المضاعفة (Immediate Reversed Martingale) """
     global is_contract_open
     current_data = get_session_data(email)
     
@@ -214,9 +210,9 @@ def apply_martingale_logic(email, entry_direction):
     current_data['current_entry_id'] = None
     current_data['open_contract_ids'] = []
     current_data['contract_profits'] = {}
-    is_contract_open[email] = False # السماح بالدخول فوراً
+    is_contract_open[email] = False 
 
-    # ------------------- حالة الربح (Win) -------------------
+    # ------------------- Win State -------------------
     if total_profit_loss >= 0:
         current_data['total_wins'] += 1
         current_data['current_step'] = 0 
@@ -226,7 +222,6 @@ def apply_martingale_logic(email, entry_direction):
         entry_result_tag = "WIN"
         print(f"✅ [ENTRY RESULT] {entry_result_tag}. PnL: {total_profit_loss:.2f}. Stake reset to base: {base_stake_used:.2f}.")
         
-        # مسح سجل التيكات للبدء من جديد
         current_data['tick_prices_history'] = [0.0] * TICK_SAMPLE_SIZE
         
         if current_data['current_profit'] >= current_data['tp_target']:
@@ -234,13 +229,12 @@ def apply_martingale_logic(email, entry_direction):
             stop_bot(email, clear_data=True, stop_reason="TP Reached")
             return
             
-    # ------------------- حالة الخسارة (Loss) -------------------
+    # ------------------- Loss State -------------------
     else: 
         current_data['total_losses'] += 1 
         current_data['consecutive_losses'] += 1
         
         if current_data['consecutive_losses'] > MAX_CONSECUTIVE_LOSSES:
-            # SL Reached - Stop and reset
             
             current_data['current_stake'] = current_data['base_stake']
             current_data['consecutive_losses'] = 0
@@ -257,7 +251,7 @@ def apply_martingale_logic(email, entry_direction):
         
         # 2. Get reversed direction
         reversed_direction = get_opposite_direction(entry_direction)
-        current_data['last_trade_direction'] = reversed_direction # حفظ الاتجاه الجديد
+        current_data['last_trade_direction'] = reversed_direction 
         
         print(f"🔄 [LOSS - REVERSED MARTINGALE] PnL: {total_profit_loss:.2f}. Con. Loss: {current_data['consecutive_losses']}/{MAX_CONSECUTIVE_LOSSES}. Next Stake: {round(new_stake, 2):.2f}. Reversing direction to {reversed_direction}.")
 
@@ -266,7 +260,7 @@ def apply_martingale_logic(email, entry_direction):
         current_data['current_entry_id'] = time.time()
         current_data['open_contract_ids'] = []
         current_data['contract_profits'] = {}
-        is_contract_open[email] = True # قفل الإشارة حتى يتم تسوية الصفقة الجديدة
+        is_contract_open[email] = True 
 
         if send_rise_fall_order(email, current_data['current_stake'], current_data['currency'], reversed_direction):
             pass
@@ -293,10 +287,7 @@ def handle_contract_settlement(email, contract_id, profit_loss):
         apply_martingale_logic(email, entry_direction)
 
 def get_candle_direction(prices):
-    """ يحدد اتجاه الشمعة (Up/Down/Flat) بناءً على أول وآخر سعر في مجموعة 5 تيكات """
     if not prices or len(prices) != CANDLE_SIZE: return None
-    # prices[0] هو السعر الأحدث (نهاية الشمعة)
-    # prices[-1] هو السعر الأقدم (بداية الشمعة)
     if prices[0] > prices[-1]:
         return "UP"
     elif prices[0] < prices[-1]:
@@ -305,7 +296,6 @@ def get_candle_direction(prices):
 
 
 def bot_core_logic(email, token, stake, tp, currency, account_type):
-    """ Core bot logic """
     
     print(f"🚀🚀 [CORE START] Bot logic started for {email}. Checking settings...") 
     
@@ -378,7 +368,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     except (KeyError, ValueError):
                         return
                         
-                    # تحديث سجل الأسعار (أحدث سعر في البداية)
                     history = current_data.get('tick_prices_history', [0.0] * TICK_SAMPLE_SIZE)
                     history.insert(0, current_price) 
                     current_data['tick_prices_history'] = history[:TICK_SAMPLE_SIZE] 
@@ -387,38 +376,20 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         save_session_data(email, current_data)
                         return
 
-                    # 1. تحديد اتجاهات الشموع الثلاثة (C1, C2, C3)
-                    candle_directions = []
-                    for i in range(3): # 3 شموع
-                        start_index = i * CANDLE_SIZE
-                        end_index = start_index + CANDLE_SIZE
-                        
-                        candle_prices = current_data['tick_prices_history'][start_index:end_index]
-                        direction = get_candle_direction(candle_prices)
-                        if direction == "FLAT":
-                            candle_directions = []
-                            break
-                        candle_directions.append(direction)
+                    # 1. Check 1 Candle (C1)
+                    # We check the first 5 ticks to determine the direction of the "candle"
+                    candle_prices = current_data['tick_prices_history'][:CANDLE_SIZE]
+                    C1 = get_candle_direction(candle_prices)
                     
-                    # 2. التحقق من شرط الدخول (النمط المزدوج لـ 3 شموع)
-                    if len(candle_directions) == 3:
-                        C1, C2, C3 = candle_directions[0], candle_directions[1], candle_directions[2]
+                    
+                    pattern_met = False
+                    entry_direction = None
 
-                        # النمط الأول: Up, Down, Up (C3 هو Up)
-                        pattern_1_met = (
-                            C1 == "UP" and C2 == "DOWN" and 
-                            C3 == "UP"
-                        )
-
-                        # النمط الثاني: Down, Up, Down (C3 هو Down)
-                        pattern_2_met = (
-                            C1 == "DOWN" and C2 == "UP" and 
-                            C3 == "DOWN"
-                        )
+                    # Simplest trigger: If C1 is UP or DOWN (not FLAT)
+                    if C1 in ["UP", "DOWN"]:
+                        pattern_met = True
+                        entry_direction = "RISE" if C1 == "UP" else "FALL"
                         
-                        pattern_met = pattern_1_met or pattern_2_met
-                    else:
-                        pattern_met = False
                     
                     current_data['last_valid_tick_price'] = current_price
                     current_data['last_tick_data'] = data['tick']
@@ -428,16 +399,9 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                         
                         if pattern_met:
                             
-                            if pattern_1_met:
-                                # C3 هو UP -> الدخول RISE
-                                entry_direction = "RISE" 
-                            elif pattern_2_met:
-                                # C3 هو DOWN -> الدخول FALL
-                                entry_direction = "FALL"
-
-                            print(f"📊 [ENTRY CONDITION MET] Pattern: {C1}, {C2}, {C3}. Entering {entry_direction} (Initial Trade).")
+                            print(f"📊 [ENTRY CONDITION MET] Pattern: {C1}. Entering {entry_direction} (Initial Trade).")
                             
-                            # --- منطق بدء الصفقة الجديدة ---
+                            
                             stake = current_data['current_stake']
                             currency_to_use = current_data['currency']
                             
@@ -449,7 +413,7 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                             current_data['current_entry_id'] = time.time()
                             current_data['open_contract_ids'] = []
                             current_data['contract_profits'] = {}
-                            current_data['last_trade_direction'] = entry_direction # حفظ اتجاه الدخول
+                            current_data['last_trade_direction'] = entry_direction 
 
                             if send_rise_fall_order(email, stake, currency_to_use, entry_direction):
                                 pass
@@ -458,7 +422,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 
                             current_data['last_entry_time'] = int(time.time())
                             current_data['last_entry_price'] = current_data.get('last_valid_tick_price', 0.0)
-                            # -------------------------------
 
                             current_data = get_session_data(email) 
                             
@@ -595,8 +558,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {# 💡 تحديث وصف الاستراتيجية #}
-    {% set strategy = 'Rise/Fall (5 Ticks) | Entry: Reversed Candle Pattern (3 Candles) on 15 Ticks | Immediate REVERSED Martingale x' + martingale_multiplier|string + ' (Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string + ')' %}
+    {% set strategy = 'Rise/Fall (5 Ticks) | Entry: Single 5-Tick Direction (No Pattern) | Immediate REVERSED Martingale x' + martingale_multiplier|string + ' (Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string + ')' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -713,7 +675,7 @@ def index():
         session_data['stop_reason'] = "Displayed"
         save_session_data(email, session_data)
     
-    contract_type_name = "Rise/Fall (3 Reversed Candles, 15 Ticks)"
+    contract_type_name = "Rise/Fall (1 Candle, 5 Ticks)"
 
     return render_template_string(CONTROL_FORM,
         email=email,
@@ -759,7 +721,6 @@ def start_bot():
                 flash('Bot is already running. Please stop it manually first.', 'info')
                 return redirect(url_for('index'))
             else:
-                 # تنظيف أي عملية غير حية عالقة
                 del active_processes[email]
 
     try:
@@ -782,7 +743,7 @@ def start_bot():
         current_data['current_stake'] = stake 
         current_data['stop_reason'] = "SL State Cleared" 
         save_session_data(email, current_data)
-        flash("🛑 تم إيقاف البوت مسبقًا بسبب تجاوز حد الخسارة (Stop Loss). تمت إعادة ضبط حالته إلى الأساس لبدء جولة جديدة.", 'error')
+        flash("🛑 Stop Loss reached previously. Resetting state to base stake for new round.", 'error')
 
 
     process = Process(target=bot_core_logic, args=(email, token, stake, tp, currency, account_type))
@@ -791,8 +752,7 @@ def start_bot():
     
     with PROCESS_LOCK: active_processes[email] = process
     
-    # 💡 تحديث وصف الاستراتيجية في رسالة Flash
-    flash(f'Bot started successfully. Strategy: Rise/Fall (5 Ticks) on Reversed Candle Pattern (3 Candles) / Immediate REVERSED Martingale x{MARTINGALE_MULTIPLIER} (Max {MAX_CONSECUTIVE_LOSSES} Losses, Max Step {MAX_MARTINGALE_STEP}).', 'success')
+    flash(f'Bot started successfully. Strategy: 5 Ticks / Same Direction Entry (No Pattern) / Immediate REVERSED Martingale x{MARTINGALE_MULTIPLIER} (Max {MAX_CONSECUTIVE_LOSSES} Losses, Max Step {MAX_MARTINGALE_STEP}).', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
