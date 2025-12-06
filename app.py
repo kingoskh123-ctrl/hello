@@ -11,7 +11,6 @@ from datetime import datetime, timezone
 # ==========================================================
 # BOT CONSTANT SETTINGS
 # ==========================================================
-# رابط موحد لـ Deriv - يتم تحديد نوع الحساب بواسطة API Token
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929" 
 SYMBOL = "R_100"       
 DURATION = 5          
@@ -147,24 +146,19 @@ def load_allowed_users():
 def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"): 
     """ 
     توقف عملية البوت، وتحديث الحالة، ومسح البيانات القسري.
-    تم تحسينه لضمان الإيقاف.
     """
     global is_contract_open 
     global flask_local_processes 
 
-    # 1. تحديث الحالة في الملف أولاً
     current_data = get_session_data(email)
     current_data["is_running"] = False
     current_data["stop_reason"] = stop_reason 
-    # حفظ الحالة لكي تتمكن عملية البوت من قراءتها والخروج ذاتياً (Self-Termination)
     save_session_data(email, current_data) 
     
-    # 2. إنهاء العملية (Process) قسرياً
     if email in flask_local_processes:
         try:
             process = flask_local_processes[email]
             if process.is_alive():
-                # محاولة الإنهاء القسري مع مهلة قصيرة
                 process.terminate() 
                 process.join(timeout=2) 
             del flask_local_processes[email] 
@@ -175,12 +169,10 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     if email in is_contract_open:
         del is_contract_open[email]
 
-    # 3. حذف البيانات (يحدث هنا إذا كانت clear_data=True)
     if clear_data:
         delete_session_data(email) 
         print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}) and session data cleared from file.")
         
-        # حفظ حالة افتراضية مؤقتة لعرض رسالة التوقف الأخيرة
         temp_data = DEFAULT_SESSION_STATE.copy()
         temp_data["stop_reason"] = stop_reason
         save_session_data(email, temp_data) 
@@ -197,6 +189,7 @@ def calculate_martingale_stake(base_stake, current_stake, current_step):
     if current_step <= MARTINGALE_STEPS:
         return current_stake * MARTINGALE_MULTIPLIER 
     else:
+        # إذا تجاوزنا الحد الأقصى للخطوات، نبدأ من جديد بالرهان الأساسي
         return base_stake
 
 def send_trade_order(email, stake, contract_type, currency_code):
@@ -221,29 +214,47 @@ def send_trade_order(email, stake, contract_type, currency_code):
     }
     try:
         ws_app.send(json.dumps(trade_request))
+        # 💡 تعيين الحالة إلى True فوراً بعد إرسال الطلب
         is_contract_open[email] = True 
         print(f"💰 [TRADE] Sent {contract_type} ({currency_code}) with stake: {rounded_stake:.2f}")
     except Exception as e:
         print(f"❌ [TRADE ERROR] Could not send trade order: {e}")
         pass
 
-def re_enter_immediately(email, last_loss_stake):
+# 💡 الدالة المسؤولة عن الدخول الفوري بعد الخسارة
+def re_enter_trade(email, last_loss_stake):
+    """
+    تحسب الرهان المضاعف، وتحدد الاتجاه المعكوس، وترسل أمر التداول فوراً.
+    """
     current_data = get_session_data(email)
     
+    new_step = current_data['current_step']
+    last_losing_trade = current_data['last_losing_trade_type']
+
+    # 1. تحديد الرهان المضاعف
     new_stake = calculate_martingale_stake(
         current_data['base_stake'],
         last_loss_stake,
-        current_data['current_step'] 
+        new_step
     )
 
+    # 2. تحديد الاتجاه المعكوس (Martingale Reversal)
+    if last_losing_trade == "CALL":
+        contract_type_to_use = "PUT"
+    else: 
+        contract_type_to_use = "CALL"
+
+    # 3. تحديث وحفظ بيانات الجلسة
     current_data['current_stake'] = new_stake
+    current_data['current_trade_state']['type'] = contract_type_to_use 
     save_session_data(email, current_data)
+
+    # 4. إرسال أمر الشراء الفوري 
+    send_trade_order(email, new_stake, contract_type_to_use, current_data['currency'])
 
 
 def check_pnl_limits(email, profit_loss, trade_type): 
     global is_contract_open 
-    
-    is_contract_open[email] = False 
 
     current_data = get_session_data(email)
     if not current_data.get('is_running'): return
@@ -278,12 +289,17 @@ def check_pnl_limits(email, profit_loss, trade_type):
     
     if stop_triggered:
         stop_bot(email, clear_data=True, stop_reason=stop_triggered) 
+        is_contract_open[email] = False # إغلاق الحالة بعد التوقف
         return 
         
     if profit_loss < 0 and current_data['is_running']:
-        re_enter_immediately(email, last_stake) 
+        # 💡 الدخول الفوري هنا!
+        re_enter_trade(email, last_stake) 
         return
-        
+    
+    # إذا كانت الصفقة ربح (profit_loss > 0) أو لم يحدث دخول فوري، نغلق حالة العقد
+    is_contract_open[email] = False 
+
     state = current_data['current_trade_state']
     rounded_last_stake = round(last_stake, 2)
     print(f"[LOG {email}] PNL: {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Last Stake: {rounded_last_stake:.2f}, State: {state['type']}")
@@ -312,14 +328,20 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         "tick_history": [], 
         "last_losing_trade_type": "CALL",
         "account_type": account_type,
-        "currency": currency_code
+        "currency": currency_code,
+        # إعادة تعيين حالة الجلسة عند البداية
+        "current_profit": 0.0,
+        "current_step": 0,
+        "consecutive_losses": 0,
+        "total_wins": 0,
+        "total_losses": 0,
+        "open_contract_id": None,
     })
     save_session_data(email, session_data)
 
     while True: 
         current_data = get_session_data(email)
         
-        # 1. نقطة فحص الإيقاف الأساسية (قبل الاتصال)
         if not current_data.get('is_running'):
             break
 
@@ -357,7 +379,6 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
             
             current_data = get_session_data(email) 
             
-            # 2. فحص الإغلاق السريع (Self-Termination via File)
             if not current_data.get('is_running'):
                 ws_app.close() 
                 return
@@ -380,18 +401,25 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 
                 save_session_data(email, current_data) 
                 
+                # 1. إذا كان العقد مفتوحاً حالياً، نتجاهل أي إشارة دخول جديدة
                 if is_contract_open.get(email) is True: 
                     return 
-                    
                 
+                # 2. 💡 التعديل الحاسم: إذا كنا في خطوة مضاعفة، نتجاهل شروط النمط والوقت
+                # ونعتمد فقط على أمر الدخول الفوري الذي يتم إطلاقه من دالة check_pnl_limits
+                if current_data['current_step'] > 0:
+                    return 
+                    
                 time_since_last_entry = current_timestamp - current_data['last_entry_time']
                 
+                # 3. منطق الدخول الأولي (فقط عندما current_step = 0)
                 if time_since_last_entry >= 14 and is_entry_time: 
                     
                     if len(current_data['tick_history']) < TICK_HISTORY_SIZE:
                         return 
 
                     tick_history = current_data['tick_history']
+                    # تحليل الشموع (كل 5 تيكس)
                     candlestick_1 = tick_history[0:5]
                     candlestick_2 = tick_history[5:10]
                     candlestick_3 = tick_history[10:15]
@@ -402,21 +430,16 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
 
                     contract_type_to_use = None
                     
+                    # نمط صعود/هبوط/صعود -> دخول CALL
                     if c1_rising and not c2_rising and c3_rising:
                         contract_type_to_use = "CALL"
+                    # نمط هبوط/صعود/هبوط -> دخول PUT
                     elif not c1_rising and c2_rising and not c3_rising:
                         contract_type_to_use = "PUT"
                         
                     if contract_type_to_use is None:
                         return 
                         
-                    if current_data['current_step'] > 0:
-                        last_losing_trade = current_data['last_losing_trade_type']
-                        if last_losing_trade == "CALL":
-                            contract_type_to_use = "PUT"
-                        else: 
-                            contract_type_to_use = "CALL"
-
                     stake_to_use = current_data['current_stake']
                     entry_price = current_data['last_tick_data']['price']
                     current_data['last_entry_price'] = entry_price
@@ -430,6 +453,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 contract_id = data['buy']['contract_id']
                 
                 current_data = get_session_data(email)
+                # 💡 حفظ ID الصفقة لغرض الاستعادة
                 current_data['open_contract_id'] = str(contract_id) 
                 save_session_data(email, current_data)
                 
@@ -441,9 +465,11 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                     trade_type = contract.get('contract_type')
                     
                     current_data = get_session_data(email)
+                    # 💡 مسح ID الصفقة لأنها بيعت
                     current_data['open_contract_id'] = None
                     save_session_data(email, current_data) 
                     
+                    # معالجة النتيجة وإطلاق المضاعفة الفورية (إذا كانت خسارة)
                     check_pnl_limits(email, contract['profit'], trade_type) 
                     if 'subscription_id' in data: ws_app.send(json.dumps({"forget": data['subscription_id']}))
 
@@ -453,7 +479,6 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         def on_close_wrapper(ws_app, code, msg):
             print(f"❌ [WS Close {email}] Code: {code}, Message: {msg}")
             
-        # 3. فحص الإغلاق عبر Ping/Pong
         def on_ping_wrapper(ws, message):
             if not get_session_data(email).get('is_running'):
                 ws.close()
@@ -465,13 +490,12 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 on_close=on_close_wrapper 
             )
             active_ws[email] = ws
-            ws.on_ping = on_ping_wrapper # ربط دالة الفحص
+            ws.on_ping = on_ping_wrapper 
             ws.run_forever(ping_interval=20, ping_timeout=10) 
             
         except Exception as e:
             print(f"❌ [ERROR] WebSocket failed for {email}: {e}")
         
-        # 4. نقطة فحص الإيقاف الثانوية (بعد فشل الاتصال/إغلاقه)
         if get_session_data(email).get('is_running') is False:
             break
         
@@ -488,7 +512,7 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
 app.config['SESSION_PERMANENT'] = False 
 
-# --- HTML Templates ---
+# --- HTML Templates (لضمان عمل الواجهة) ---
 
 CONTROL_FORM = """
 <!doctype html>
@@ -569,6 +593,12 @@ CONTROL_FORM = """
     <div class="data-box">
         <p>Account Type: <b>{{ session_data.account_type.upper() }}</b> | Currency: <b>{{ session_data.currency }}</b></p>
         <p>Net Profit: <b>{{ session_data.currency }} {{ session_data.current_profit|round(2) }}</b></p>
+        
+        <p style="font-weight: bold; color: {% if session_data.open_contract_id %}#007bff{% else %}#555{% endif %};">
+            Open Contract Status: 
+            <b>{% if session_data.open_contract_id %}1{% else %}0{% endif %}</b>
+        </p>
+
         <p>Current Stake: <b>{{ session_data.currency }} {{ session_data.current_stake|round(2) }}</b></p>
         <p style="font-weight: bold; color: {% if session_data.consecutive_losses > 0 %}red{% else %}green{% endif %};">
         Consecutive Losses: <b>{{ session_data.consecutive_losses }}</b> / {{ max_consecutive_losses }} 
@@ -656,6 +686,7 @@ AUTH_FORM = """
     <button type="submit">Login</button>
 </form>
 """
+
 # ----------------- End of HTML Templates -----------------
 
 @app.before_request
@@ -755,11 +786,9 @@ def stop_route():
     email = session['email']
     
     if request.form.get('force_stop') == 'true':
-        # يدوياً وقسرياً (Force Clear)
         stop_bot(email, clear_data=True, stop_reason="Stopped Manually (Force Clear)") 
         flash('🧹 Force stop executed. Bot process terminated and session data cleared.', 'success')
     else:
-        # يدوياً عادياً
         stop_bot(email, clear_data=True, stop_reason="Stopped Manually") 
         flash('🛑 Bot process stopped and session data cleared.', 'success')
         
