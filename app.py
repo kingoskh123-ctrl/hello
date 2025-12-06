@@ -1,7 +1,6 @@
 import time
 import json
 import websocket 
-# ⚠️ استخدام multiprocessing لإدارة العمليات المنفصلة
 import multiprocessing 
 import os 
 import sys 
@@ -21,18 +20,20 @@ MAX_CONSECUTIVE_LOSSES = 5
 RECONNECT_DELAY = 1      
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
-TICK_HISTORY_SIZE = 15 # تحليل 15 تيك
+TICK_HISTORY_SIZE = 15 
 # ==========================================================
 
 # ==========================================================
-# BOT RUNTIME STATE (Multiprocess Shared Cache)
+# BOT RUNTIME STATE (Shared and Local)
 # ==========================================================
 
-# ⚠️ Manager لإدارة البيانات المشتركة بين عملية Flask وعمليات البوت
-manager = multiprocessing.Manager()
-active_processes = manager.dict() # لتخزين العمليات النشطة
+# ⚠️ Local Dictionary to store Process objects (in Flask memory only) 
+# هذا يحل مشكلة الـ Pickling Error
+flask_local_processes = {}
 
-# هذه المتغيرات ستبقى خاصة بالعملية (Process) التي تعمل فيها
+# Manager لإدارة البيانات المشتركة (لم يعد يستخدم لتخزين كائنات Process)
+manager = multiprocessing.Manager() 
+
 active_ws = {} 
 is_contract_open = {} 
 
@@ -55,12 +56,13 @@ DEFAULT_SESSION_STATE = {
     "last_entry_price": 0.0,      
     "last_tick_data": None,       
     "tick_history": [],
-    "last_losing_trade_type": "CALL" 
+    "last_losing_trade_type": "CALL",
+    "open_contract_id": None 
 }
 # ==========================================================
 
 # ==========================================================
-# PERSISTENT STATE MANAGEMENT FUNCTIONS (Fixed for File Locking)
+# PERSISTENT STATE MANAGEMENT FUNCTIONS (File Locking)
 # ==========================================================
 def get_file_lock(f):
     try:
@@ -124,7 +126,6 @@ def get_session_data(email):
     all_sessions = load_persistent_sessions()
     if email in all_sessions:
         data = all_sessions[email]
-        # Ensure default keys exist
         for key, default_val in DEFAULT_SESSION_STATE.items():
             if key not in data:
                 data[key] = default_val
@@ -147,29 +148,29 @@ def load_allowed_users():
 def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"): 
     """ Stop the bot process (process termination if necessary) and update state. """
     global is_contract_open 
-    global active_processes
-    
-    # 1. تحديث is_running state (للإشارة إلى العملية بأن تتوقف)
+    global flask_local_processes # ⚠️ نستخدم القاموس المحلي هنا
+
+    # 1. تحديث is_running state في الملف
     current_data = get_session_data(email)
     if current_data.get("is_running") is True:
         current_data["is_running"] = False
         current_data["stop_reason"] = stop_reason 
         save_session_data(email, current_data) 
 
-    # 2. إنهاء العملية (Process) من الـ Manager إذا كانت لا تزال نشطة
-    if clear_data and email in active_processes:
+    # 2. إنهاء العملية (Process) باستخدام القاموس المحلي
+    if clear_data and email in flask_local_processes:
         try:
-            process = active_processes[email]
+            process = flask_local_processes[email]
             if process.is_alive():
                 process.terminate() # إنهاء العملية قسراً
                 process.join() 
-            del active_processes[email]
+            del flask_local_processes[email] # حذف من القاموس المحلي
             print(f"🛑 [INFO] Process for {email} forcefully terminated.")
         except Exception as e:
             print(f"❌ [ERROR] Could not terminate process for {email}: {e}")
             
     if email in is_contract_open:
-        is_contract_open[email] = False
+        del is_contract_open[email]
 
     # 3. حذف أو حفظ البيانات
     if clear_data:
@@ -179,7 +180,6 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
              delete_session_data(email)
              print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}) and session data cleared from file.")
     else:
-        # حالة إعادة الاتصال التلقائي (في هذه الحالة، يجب أن تحاول العملية نفسها إعادة الاتصال)
         pass
 
 # ==========================================================
@@ -187,17 +187,14 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 # ==========================================================
 
 def calculate_martingale_stake(base_stake, current_stake, current_step):
-    """ Martingale logic: multiply the losing stake by 2.2 """
     if current_step == 0:
         return base_stake
-        
     if current_step <= MARTINGALE_STEPS:
         return current_stake * 2.2 
     else:
         return base_stake
 
 def send_trade_order(email, stake, contract_type):
-    """ Send the actual trade order. """
     global is_contract_open 
     if email not in active_ws or active_ws[email] is None: return
     ws_app = active_ws[email]
@@ -224,7 +221,6 @@ def send_trade_order(email, stake, contract_type):
         pass
 
 def re_enter_immediately(email, last_loss_stake):
-    """ Prepares state for the Martingale stake. """
     current_data = get_session_data(email)
     
     new_stake = calculate_martingale_stake(
@@ -238,7 +234,6 @@ def re_enter_immediately(email, last_loss_stake):
 
 
 def check_pnl_limits(email, profit_loss, trade_type): 
-    """ Update statistics and handle Martingale Reversal logic. """
     global is_contract_open 
     
     is_contract_open[email] = False 
@@ -251,7 +246,6 @@ def check_pnl_limits(email, profit_loss, trade_type):
     current_data['current_profit'] += profit_loss
     
     if profit_loss > 0:
-        # 1. Win: Reset
         current_data['total_wins'] += 1
         current_data['current_step'] = 0 
         current_data['consecutive_losses'] = 0
@@ -259,25 +253,20 @@ def check_pnl_limits(email, profit_loss, trade_type):
         current_data['last_losing_trade_type'] = "CALL" 
         
     else:
-        # 2. Loss: Martingale setup
         current_data['total_losses'] += 1
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1
         
-        # 2.1. حفظ نوع الصفقة الخاسرة لتطبيق العكس في الصفقة التالية
         current_data['last_losing_trade_type'] = trade_type
         
-        # 2.2. Check Stop Loss (SL) limits
         if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES: 
             stop_bot(email, clear_data=True, stop_reason="SL Reached") 
             return 
         
-        # 2.3. Immediate re-entry preparation
         save_session_data(email, current_data) 
         re_enter_immediately(email, last_stake) 
         return
 
-    # 3. Check Take Profit (TP)
     if current_data['current_profit'] >= current_data['tp_target']:
         stop_bot(email, clear_data=True, stop_reason="TP Reached") 
         return
@@ -290,11 +279,9 @@ def check_pnl_limits(email, profit_loss, trade_type):
 
 
 def bot_core_logic(email, token, stake, tp):
-    """ Main bot logic with auto-reconnect loop. """
-    # ⚠️ إعادة تعريف active_ws و is_contract_open محلياً لكل عملية
+    """ Main bot logic for a single user/session. """
     global active_ws 
     global is_contract_open 
-    global active_processes # للوصول إلى Manager
 
     active_ws[email] = None 
     is_contract_open[email] = False
@@ -324,11 +311,25 @@ def bot_core_logic(email, token, stake, tp):
         def on_open_wrapper(ws_app):
             ws_app.send(json.dumps({"authorize": current_data['api_token']})) 
             ws_app.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
+            
             running_data = get_session_data(email)
+            
+            # 🆕 منطق استرداد العقد (Recovery)
+            contract_id = running_data.get('open_contract_id')
+            if contract_id:
+                ws_app.send(json.dumps({
+                    "proposal_open_contract": 1, 
+                    "contract_id": contract_id, 
+                    "subscribe": 1
+                }))
+                is_contract_open[email] = True 
+                print(f"🔄 [RECOVERY] Attempting to follow lost contract: {contract_id}")
+            else:
+                is_contract_open[email] = False
+
             running_data['is_running'] = True
             save_session_data(email, running_data)
             print(f"✅ [PROCESS] Connection established for {email}.")
-            is_contract_open[email] = False 
             
         def is_rising(ticks):
             return ticks[-1] > ticks[0] 
@@ -346,18 +347,16 @@ def bot_core_logic(email, token, stake, tp):
                 current_timestamp = int(data['tick']['epoch'])
                 current_price = float(data['tick']['quote'])
                 
-                # 1. تحديث آخر تيك تم استلامه
                 current_data['last_tick_data'] = {
                     "price": current_price,
                     "timestamp": current_timestamp
                 }
                 
-                # 2. تحديث سجل التيكات
                 current_data['tick_history'].append(current_price)
                 if len(current_data['tick_history']) > TICK_HISTORY_SIZE:
                     current_data['tick_history'] = current_data['tick_history'][-TICK_HISTORY_SIZE:]
                 
-                # ⚠️ الثواني المحدثة: 0، 14، 30، 44
+                # ⚠️ الثواني المحدثة للدخول: 0، 14، 30، 44
                 current_second = datetime.fromtimestamp(current_timestamp, tz=timezone.utc).second
                 is_entry_time = current_second in [0, 14, 30, 44] 
                 
@@ -369,15 +368,13 @@ def bot_core_logic(email, token, stake, tp):
                 
                 time_since_last_entry = current_timestamp - current_data['last_entry_time']
                 
-                # ⚠️ إذا تجاوزنا 14 ثانية ووصلنا إلى نقطة دخول جديدة
                 if time_since_last_entry >= 14 and is_entry_time: 
                     
                     if len(current_data['tick_history']) < TICK_HISTORY_SIZE:
                         return 
 
+                    # تحليل النمط (3 شمعات × 5 تيك)
                     tick_history = current_data['tick_history']
-                    
-                    # 3. تحليل النمط (3 شمعات × 5 تيك)
                     candlestick_1 = tick_history[0:5]
                     candlestick_2 = tick_history[5:10]
                     candlestick_3 = tick_history[10:15]
@@ -386,31 +383,23 @@ def bot_core_logic(email, token, stake, tp):
                     c2_rising = is_rising(candlestick_2)
                     c3_rising = is_rising(candlestick_3)
 
-                    # 4. تحديد نوع العقد بناءً على النمط
                     contract_type_to_use = None
                     
-                    # صاعد-هابط-صاعد -> CALL
                     if c1_rising and not c2_rising and c3_rising:
                         contract_type_to_use = "CALL"
-                        
-                    # هابط-صاعد-هابط -> PUT
                     elif not c1_rising and c2_rising and not c3_rising:
                         contract_type_to_use = "PUT"
                         
                     if contract_type_to_use is None:
                         return 
                         
-                    # 5. تطبيق منطق المارتينجال المعكوس (إذا كان هناك خسارة سابقة)
                     if current_data['current_step'] > 0:
                         last_losing_trade = current_data['last_losing_trade_type']
-                        
                         if last_losing_trade == "CALL":
                             contract_type_to_use = "PUT"
                         else: 
                             contract_type_to_use = "CALL"
 
-
-                    # 6. إرسال الصفقة
                     stake_to_use = current_data['current_stake']
                     entry_price = current_data['last_tick_data']['price']
                     current_data['last_entry_price'] = entry_price
@@ -422,16 +411,27 @@ def bot_core_logic(email, token, stake, tp):
                         
             elif msg_type == 'buy':
                 contract_id = data['buy']['contract_id']
+                
+                # 🆕 حفظ معرف العقد في ملف الجلسة (للاسترداد)
+                current_data = get_session_data(email)
+                current_data['open_contract_id'] = contract_id
+                save_session_data(email, current_data)
+                
                 ws_app.send(json.dumps({"proposal_open_contract": 1, "contract_id": contract_id, "subscribe": 1}))
             elif msg_type == 'proposal_open_contract':
                 contract = data['proposal_open_contract']
                 if contract.get('is_sold') == 1:
                     trade_type = contract.get('contract_type')
+                    
+                    # 🆕 تصفير معرف العقد بعد انتهاء الصفقة
+                    current_data = get_session_data(email)
+                    current_data['open_contract_id'] = None
+                    save_session_data(email, current_data) 
+                    
                     check_pnl_limits(email, contract['profit'], trade_type) 
                     if 'subscription_id' in data: ws_app.send(json.dumps({"forget": data['subscription_id']}))
 
         def on_close_wrapper(ws_app, code, msg):
-            # إغلاق عملية الـ WS فقط، والسماح للحلقة الخارجية بإعادة الاتصال إذا كانت is_running=True
             print(f"❌ [WS Close {email}] Code: {code}, Message: {msg}")
 
         try:
@@ -452,9 +452,7 @@ def bot_core_logic(email, token, stake, tp):
         print(f"💤 [PROCESS] Waiting {RECONNECT_DELAY} seconds before retrying connection for {email}...")
         time.sleep(RECONNECT_DELAY)
 
-    # ⚠️ عند انتهاء العملية بالكامل، يجب إزالتها من القاموس المشترك
-    if email in active_processes:
-        del active_processes[email]
+    # لا نحتاج لحذفها من manager.dict() لأننا لا نخزنها هناك أساساً
     print(f"🛑 [PROCESS] Bot process ended for {email}.")
 
 
@@ -465,9 +463,7 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
 app.config['SESSION_PERMANENT'] = False 
 
-# ----------------- HTML Templates (Auth and Control) -----------------
-# (لم يتم تغيير محتوى القوالب HTML، فقط لاستعراضهم في الكود الكامل)
-
+# --- HTML Templates (مدمجة هنا لتوفير الكود الكامل) ---
 AUTH_FORM = """
 <!doctype html>
 <title>Login - Deriv Bot</title>
@@ -585,6 +581,9 @@ CONTROL_FORM = """
         {% if session_data.tick_history|length >= TICK_HISTORY_SIZE %}
             <p style="color: green; font-weight: bold;">Pattern Ready for Analysis.</p>
         {% endif %}
+        {% if session_data.open_contract_id %}
+            <p style="font-weight: bold; color: blue;">⚠️ Contract ID: {{ session_data.open_contract_id[:8] }}... (Recovery Active)</p>
+        {% endif %}
     </div>
     
     <div class="data-box">
@@ -636,8 +635,8 @@ CONTROL_FORM = """
     autoRefresh();
 </script>
 """
+# ----------------- End of HTML Templates -----------------
 
-# ----------------- Flask Routes -----------------
 @app.before_request
 def check_user_status():
     if request.endpoint in ('login', 'auth_page', 'logout', 'static'):
@@ -674,7 +673,6 @@ def index():
         
         if reason in ["SL Reached", "TP Reached"]:
             delete_session_data(email)
-
 
     return render_template_string(CONTROL_FORM, 
         email=email,
@@ -714,9 +712,10 @@ def start_bot():
     
     email = session['email']
     
-    # ⚠️ التحقق من العمليات النشطة باستخدام القاموس المشترك
-    global active_processes
-    if email in active_processes and active_processes[email].is_alive():
+    global flask_local_processes # ⚠️ الوصول إلى القاموس المحلي
+    
+    # التحقق من العملية باستخدام القاموس المحلي
+    if email in flask_local_processes and flask_local_processes[email].is_alive():
         flash('Bot is already running.', 'info')
         return redirect(url_for('index'))
         
@@ -733,15 +732,14 @@ def start_bot():
         flash("Invalid stake or TP value.", 'error')
         return redirect(url_for('index'))
         
-    # ⚠️ تشغيل عملية (Process) جديدة
     process = multiprocessing.Process(target=bot_core_logic, args=(email, token, stake, tp))
     process.daemon = True
     process.start()
     
-    # حفظ العملية في القاموس المشترك
-    active_processes[email] = process
+    # ⚠️ تخزين كائن Process في القاموس المحلي للـ Flask
+    flask_local_processes[email] = process
     
-    flash('Bot process started successfully. It runs in a separate process.', 'success')
+    flash('Bot process started successfully. Recovery mechanism is active.', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
@@ -749,7 +747,6 @@ def stop_route():
     if 'email' not in session:
         return redirect(url_for('auth_page'))
     
-    # سيتم إيقاف العملية عبر دالة stop_bot المعدلة
     stop_bot(session['email'], clear_data=True, stop_reason="Stopped Manually") 
     flash('Bot process stopped and session data cleared.', 'success')
     return redirect(url_for('index'))
@@ -762,7 +759,6 @@ def logout():
 
 
 if __name__ == '__main__':
-    # ⚠️ ملاحظة: يجب أن يكون ملف user_ids.txt موجوداً يحتوي على الإيميلات المصرح لها
     port = int(os.environ.get("PORT", 5000))
     # use_reloader=False ضرورية لتجنب تشغيل العمليات مرتين
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
