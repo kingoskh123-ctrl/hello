@@ -12,18 +12,19 @@ import traceback
 from collections import Counter
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (R_100 | Single DigitDiff | DELAYED Martingale x14.0 | Max Loss 1)
+# BOT CONSTANT SETTINGS (R_100 | Rise/Fall | Immediate Reversed Martingale x2.2 | 20 Ticks/4 Candles)
 # ==========================================================
 WSS_URL = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"      
-DURATION = 1           # مدة الصفقة 1 تيك
+DURATION = 5           # 💡 التعديل: مدة الصفقة 5 تيك
 DURATION_UNIT = "t"    
 
 # إعدادات المضاعفة والتحليل
-TICK_SAMPLE_SIZE = 4             # 💡 التعديل: 4 تيكات
-MAX_CONSECUTIVE_LOSSES = 1       # 💡 التعديل: الحد الأقصى للخسائر المتتالية هو 1
-MARTINGALE_MULTIPLIER = 14.0     
-MAX_MARTINGALE_STEP = 1          # 💡 التعديل: خطوة مضاعفة واحدة فقط
+TICK_SAMPLE_SIZE = 20            
+CANDLE_SIZE = 5                  
+MAX_CONSECUTIVE_LOSSES = 4       # 💡 التعديل: الحد الأقصى للخسائر 4
+MARTINGALE_MULTIPLIER = 2.2      # 💡 التعديل: المضاعف x2.2
+MAX_MARTINGALE_STEP = 4          # 💡 التعديل: الحد الأقصى لخطوات المضاعفة 4
 
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
@@ -60,10 +61,8 @@ DEFAULT_SESSION_STATE = {
     "current_entry_id": None,                
     "open_contract_ids": [],                 
     "contract_profits": {},                  
-    "last_two_digits": [9, 9],
-    "last_digits_history": [9, 9, 9, 9], # 4 تيكات
-    "last_trade_barrier": 9, 
-    "awaiting_martingale_signal": False,  # متغير لانتظار إشارة المضاعفة
+    "last_trade_direction": "FALL",        
+    "tick_prices_history": [0.0] * TICK_SAMPLE_SIZE, 
 }
 
 # --- Persistence functions ---
@@ -88,9 +87,8 @@ def get_session_data(email):
         data = all_sessions[email]
         for key, default_val in DEFAULT_SESSION_STATE.items():
             if key not in data: data[key] = default_val
-        # ضمان أن تاريخ التيكات يحتوي على 4 عناصر
-        if 'last_digits_history' not in data or len(data['last_digits_history']) != TICK_SAMPLE_SIZE: 
-             data['last_digits_history'] = [9] * TICK_SAMPLE_SIZE 
+        if 'tick_prices_history' not in data or len(data['tick_prices_history']) != TICK_SAMPLE_SIZE: 
+             data['tick_prices_history'] = [0.0] * TICK_SAMPLE_SIZE 
         return data
     return DEFAULT_SESSION_STATE.copy()
 
@@ -157,9 +155,12 @@ def calculate_martingale_stake(base_stake, current_step, multiplier):
     step = min(current_step, MAX_MARTINGALE_STEP)
     return base_stake * (multiplier ** step)
 
+def get_opposite_direction(direction):
+    """ يعكس اتجاه الصفقة """
+    return "FALL" if direction == "RISE" else "RISE"
 
-def send_single_digitdiff_order(email, stake, currency, barrier_digit):
-    """ إرسال صفقة واحدة من نوع DIGITDIFF بالحاجز المحدد (T1). """
+def send_rise_fall_order(email, stake, currency, direction):
+    """ إرسال صفقة واحدة من نوع RISE أو FALL """
     global active_ws, DURATION, DURATION_UNIT, SYMBOL
     
     if email not in active_ws or active_ws[email] is None: 
@@ -168,9 +169,7 @@ def send_single_digitdiff_order(email, stake, currency, barrier_digit):
         
     ws_app = active_ws[email]
     
-    # نوع العقد: DIGITDIFF
-    contract_type = "DIGITDIFF"
-    barrier = barrier_digit 
+    contract_type = direction 
 
     trade_request = {
         "buy": 1,
@@ -183,11 +182,10 @@ def send_single_digitdiff_order(email, stake, currency, barrier_digit):
             "duration": DURATION,
             "duration_unit": DURATION_UNIT,
             "symbol": SYMBOL,
-            "barrier": barrier 
         }
     }
     try:
-        print(f"✅ [DEBUG] Sending BUY request for {contract_type} {barrier} at {round(stake, 2):.2f}...")
+        print(f"✅ [DEBUG] Sending BUY request for {contract_type} at {round(stake, 2):.2f}...")
         ws_app.send(json.dumps(trade_request))
         return True
     except Exception as e:
@@ -195,8 +193,8 @@ def send_single_digitdiff_order(email, stake, currency, barrier_digit):
         return False
 
 
-def apply_martingale_logic(email):
-    """ منطق تسوية العقد وتحديث حالة المضاعفة (Delayed Martingale Setup) """
+def apply_martingale_logic(email, entry_direction):
+    """ منطق تسوية العقد وتحديث حالة المضاعفة (Immediate Reversed Martingale) """
     global is_contract_open
     current_data = get_session_data(email)
     
@@ -211,26 +209,24 @@ def apply_martingale_logic(email):
     
     base_stake_used = current_data['base_stake']
     
+    # Reset contract state
+    current_data['current_entry_id'] = None
+    current_data['open_contract_ids'] = []
+    current_data['contract_profits'] = {}
+    is_contract_open[email] = False # السماح بالدخول فوراً
+
     # ------------------- حالة الربح (Win) -------------------
     if total_profit_loss >= 0:
         current_data['total_wins'] += 1
         current_data['current_step'] = 0 
         current_data['consecutive_losses'] = 0
         current_data['current_stake'] = base_stake_used
-        current_data['awaiting_martingale_signal'] = False # إيقاف انتظار المضاعفة
-
+        
         entry_result_tag = "WIN"
         print(f"✅ [ENTRY RESULT] {entry_result_tag}. PnL: {total_profit_loss:.2f}. Stake reset to base: {base_stake_used:.2f}.")
         
-        # 💡 مسح سجل التيكات بعد الربح 
-        current_data['last_digits_history'] = [9] * TICK_SAMPLE_SIZE
-        current_data['last_trade_barrier'] = 9 
-        
-        # Reset contract state
-        current_data['current_entry_id'] = None
-        current_data['open_contract_ids'] = []
-        current_data['contract_profits'] = {}
-        is_contract_open[email] = False # السماح بإشارة الدخول التالية
+        # مسح سجل التيكات للبدء من جديد
+        current_data['tick_prices_history'] = [0.0] * TICK_SAMPLE_SIZE
         
         if current_data['current_profit'] >= current_data['tp_target']:
             save_session_data(email, current_data)
@@ -245,7 +241,6 @@ def apply_martingale_logic(email):
         if current_data['consecutive_losses'] > MAX_CONSECUTIVE_LOSSES:
             # SL Reached - Stop and reset
             
-            # 💡 تصفير حالة المضاعفة قبل الإيقاف الفعلي
             current_data['current_stake'] = current_data['base_stake']
             current_data['consecutive_losses'] = 0
             current_data['current_step'] = 0
@@ -259,16 +254,23 @@ def apply_martingale_logic(email):
         new_stake = calculate_martingale_stake(base_stake_used, current_data['current_step'], MARTINGALE_MULTIPLIER)
         current_data['current_stake'] = new_stake
         
-        # 2. Set delayed martingale flag
-        current_data['awaiting_martingale_signal'] = True
+        # 2. Get reversed direction
+        reversed_direction = get_opposite_direction(entry_direction)
+        current_data['last_trade_direction'] = reversed_direction # حفظ الاتجاه الجديد
         
-        print(f"🔄 [LOSS - DELAYED MARTINGALE] PnL: {total_profit_loss:.2f}. Con. Loss: {current_data['consecutive_losses']}/{MAX_CONSECUTIVE_LOSSES}. Step: {current_data['current_step']}/{MAX_MARTINGALE_STEP}. Next Stake: {round(new_stake, 2):.2f}. Waiting for next T1=T2=T4 signal...")
+        print(f"🔄 [LOSS - REVERSED MARTINGALE] PnL: {total_profit_loss:.2f}. Con. Loss: {current_data['consecutive_losses']}/{MAX_CONSECUTIVE_LOSSES}. Next Stake: {round(new_stake, 2):.2f}. Reversing direction to {reversed_direction}.")
+
+        # 3. IMMEDIATE RE-ENTRY
         
-        # Reset contract state
-        current_data['current_entry_id'] = None
+        current_data['current_entry_id'] = time.time()
         current_data['open_contract_ids'] = []
         current_data['contract_profits'] = {}
-        is_contract_open[email] = False # السماح بإشارة الدخول التالية (لتنفيذ المضاعفة)
+        is_contract_open[email] = True # قفل الإشارة حتى يتم تسوية الصفقة الجديدة
+
+        if send_rise_fall_order(email, current_data['current_stake'], current_data['currency'], reversed_direction):
+            pass
+        else:
+            stop_bot(email, clear_data=True, stop_reason="API Buy Error during Martingale")
         
     save_session_data(email, current_data)
 
@@ -285,9 +287,20 @@ def handle_contract_settlement(email, contract_id, profit_loss):
         
     save_session_data(email, current_data)
     
-    # بعد أن يتم تسوية العقد الوحيد، نبدأ منطق التسوية وتحديد وضع المضاعفة
     if not current_data['open_contract_ids'] and len(current_data['contract_profits']) == 1:
-        apply_martingale_logic(email)
+        entry_direction = current_data['last_trade_direction']
+        apply_martingale_logic(email, entry_direction)
+
+def get_candle_direction(prices):
+    """ يحدد اتجاه الشمعة (Up/Down/Flat) بناءً على أول وآخر سعر في مجموعة 5 تيكات """
+    if not prices or len(prices) != CANDLE_SIZE: return None
+    # prices[0] هو السعر الأحدث (نهاية الشمعة)
+    # prices[-1] هو السعر الأقدم (بداية الشمعة)
+    if prices[0] > prices[-1]:
+        return "UP"
+    elif prices[0] < prices[-1]:
+        return "DOWN"
+    return "FLAT"
 
 
 def bot_core_logic(email, token, stake, tp, currency, account_type):
@@ -302,13 +315,11 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 
     session_data = get_session_data(email)
     
-    # 💡 تصفير حالة الخسارة والمضاعفة عند محاولة التشغيل بعد SL
     if session_data.get('consecutive_losses', 0) > MAX_CONSECUTIVE_LOSSES:
         session_data['consecutive_losses'] = 0
         session_data['current_step'] = 0
-        session_data['current_stake'] = stake # يتم استخدام الـ stake الأساسي من الفورم
+        session_data['current_stake'] = stake
         session_data['stop_reason'] = "SL State Cleared"
-        print("⚠️ [RESUME FIX] Resetting Martingale/Loss state after detecting previous SL breach.")
     
     initial_stake = session_data.get('current_stake', stake)
     if session_data.get('consecutive_losses') == 0:
@@ -321,24 +332,15 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
         "last_entry_price": 0.0, "last_tick_data": None, "currency": currency,
         "account_type": account_type, "last_valid_tick_price": 0.0,
         "current_entry_id": None, "open_contract_ids": [], "contract_profits": {},
-        "last_two_digits": [9, 9],
-        "last_digits_history": [9] * TICK_SAMPLE_SIZE, # يتم التأكد من أن الحجم هو 4
-        "last_trade_barrier": 9,
-        "awaiting_martingale_signal": session_data.get('consecutive_losses', 0) > 0 # يبدأ بالانتظار إذا كان هناك خسائر سابقة
+        "last_trade_direction": "FALL", 
+        "tick_prices_history": [0.0] * TICK_SAMPLE_SIZE,
     })
     save_session_data(email, session_data)
-
-    if session_data.get('consecutive_losses', 0) > 0:
-        print("🔍 [RECOVERY] Resuming in Delayed Martingale mode. Waiting for next T1=T2=T4 signal.")
-        is_contract_open[email] = False 
 
     try:
         while True:
             current_data = get_session_data(email)
-            
             if not current_data.get('is_running'): break
-
-            print(f"🔗 [PROCESS] Attempting to connect for {email} ({account_type.upper()}/{currency})...")
 
             def on_open_wrapper(ws_app):
                 current_data = get_session_data(email) 
@@ -359,12 +361,8 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                                 "contract_id": contract_id, 
                                 "subscribe": 1  
                             }))
-                
-                elif current_data.get('awaiting_martingale_signal'):
-                    print(f"🔥 [RESUME MARTINGALE] Awaiting next T1=T2=T4 signal.")
-                    is_contract_open[email] = False
                 else:
-                    is_contract_open[email] = False 
+                    is_contract_open[email] = False
 
             def on_message_wrapper(ws_app, message):
                 data = json.loads(message)
@@ -379,55 +377,71 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                     except (KeyError, ValueError):
                         return
                         
-                    T_new = int(str(current_price)[-1]) # الرقم الأخير للتيك الجديد
+                    # تحديث سجل الأسعار (أحدث سعر في البداية)
+                    history = current_data.get('tick_prices_history', [0.0] * TICK_SAMPLE_SIZE)
+                    history.insert(0, current_price) 
+                    current_data['tick_prices_history'] = history[:TICK_SAMPLE_SIZE] 
                     
-                    # 💡 تحديث: يتم حفظ آخر 4 تيكات
-                    history = current_data.get('last_digits_history', [9] * TICK_SAMPLE_SIZE)
-                    history.insert(0, T_new) 
-                    current_data['last_digits_history'] = history[:TICK_SAMPLE_SIZE] 
-                    
-                    if len(history) < TICK_SAMPLE_SIZE: 
+                    if len(history) < TICK_SAMPLE_SIZE or history[-1] == 0.0: 
                         save_session_data(email, current_data)
                         return
 
-                    # T1: الأحدث (index 0)
-                    # T2: index 1
-                    # T4: الأقدم (index 3)
-                    T1 = current_data['last_digits_history'][0]
-                    T2 = current_data['last_digits_history'][1] 
-                    T4 = current_data['last_digits_history'][3] 
+                    # 1. تحديد اتجاهات الشموع الأربعة (C1, C2, C3, C4)
+                    candle_directions = []
+                    for i in range(4): # 4 شموع
+                        start_index = i * CANDLE_SIZE
+                        end_index = start_index + CANDLE_SIZE
+                        
+                        # التيكات مرتبة من الأحدث (0) إلى الأقدم (19)
+                        candle_prices = current_data['tick_prices_history'][start_index:end_index]
+                        direction = get_candle_direction(candle_prices)
+                        if direction == "FLAT":
+                            candle_directions = []
+                            break
+                        candle_directions.append(direction)
+                    
+                    # 2. التحقق من شرط الدخول (النمط المزدوج)
+                    if len(candle_directions) == 4:
+                        C1, C2, C3, C4 = candle_directions[0], candle_directions[1], candle_directions[2], candle_directions[3]
+
+                        # النمط الأول: Up, Down, Up, Down (C4 هو Down)
+                        pattern_1_met = (
+                            C1 == "UP" and C2 == "DOWN" and 
+                            C3 == "UP" and C4 == "DOWN"
+                        )
+
+                        # النمط الثاني: Down, Up, Down, Up (C4 هو Up)
+                        pattern_2_met = (
+                            C1 == "DOWN" and C2 == "UP" and 
+                            C3 == "DOWN" and C4 == "UP"
+                        )
+                        
+                        pattern_met = pattern_1_met or pattern_2_met
+                    else:
+                        pattern_met = False
                     
                     current_data['last_valid_tick_price'] = current_price
                     current_data['last_tick_data'] = data['tick']
                     
                     
-                    # 2. التحقق من شرط الدخول (4 تيك، شرط T1=T2=T4)
                     if not is_contract_open.get(email):
                         
-                        # 💡 شرط الدخول الجديد: T1=T2 و T1=T4
-                        condition_met = (T1 == T2) and (T1 == T4)
-                        
-                        if condition_met:
+                        if pattern_met:
                             
-                            # 💡 الحاجز: T1 دائماً
-                            barrier_digit = T1 
+                            if pattern_1_met:
+                                # C4 هو DOWN -> الدخول FALL
+                                entry_direction = "FALL" 
+                            elif pattern_2_met:
+                                # C4 هو UP -> الدخول RISE
+                                entry_direction = "RISE"
 
-                            # تحديد وضع الدخول
-                            if current_data.get('awaiting_martingale_signal'):
-                                entry_mode = f"Delayed Martingale Step {current_data['current_step']}"
-                                current_data['awaiting_martingale_signal'] = False # إيقاف الانتظار بعد تحقيق الإشارة
-                            else:
-                                entry_mode = "Initial Trade/After Win"
-                                
-                            print(f"📊 [ENTRY CONDITION MET] T1={T1}, T2={T2}, T4={T4}. Barrier is T1={T1}. Entering Single DIGITDIFF. ({entry_mode})")
+                            print(f"📊 [ENTRY CONDITION MET] Pattern: {C1}, {C2}, {C3}, {C4}. Entering {entry_direction} (Initial Trade).")
                             
                             # --- منطق بدء الصفقة الجديدة ---
                             stake = current_data['current_stake']
                             currency_to_use = current_data['currency']
                             
-                            # 💡 التحقق مرة أخرى من SL قبل إرسال الصفقة 
-                            if current_data.get('consecutive_losses', 0) >= MAX_CONSECUTIVE_LOSSES and not current_data.get('awaiting_martingale_signal'):
-                                print("❌ [SL GUARD] Preventing trade as consecutive losses limit was reached internally.")
+                            if current_data.get('consecutive_losses', 0) > MAX_CONSECUTIVE_LOSSES:
                                 stop_bot(email, clear_data=True, stop_reason=f"SL Reached: Max {MAX_CONSECUTIVE_LOSSES} Consecutive Losses reached.")
                                 save_session_data(email, current_data)
                                 return
@@ -435,9 +449,9 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
                             current_data['current_entry_id'] = time.time()
                             current_data['open_contract_ids'] = []
                             current_data['contract_profits'] = {}
-                            current_data['last_trade_barrier'] = barrier_digit # حفظ الحاجز (T1)
+                            current_data['last_trade_direction'] = entry_direction # حفظ اتجاه الدخول
 
-                            if send_single_digitdiff_order(email, stake, currency_to_use, barrier_digit):
+                            if send_rise_fall_order(email, stake, currency_to_use, entry_direction):
                                 pass
                                 
                             is_contract_open[email] = True
@@ -452,7 +466,6 @@ def bot_core_logic(email, token, stake, tp, currency, account_type):
 
                 elif msg_type == 'buy':
                     contract_id = data['buy']['contract_id']
-                    # 💡 عقد واحد فقط
                     current_data['open_contract_ids'] = [contract_id]
                     current_data['contract_profits'] = {} 
                     save_session_data(email, current_data)
@@ -583,7 +596,7 @@ CONTROL_FORM = """
 
 {% if session_data and session_data.is_running %}
     {# 💡 تحديث وصف الاستراتيجية #}
-    {% set strategy = 'Single DigitDiff | Entry: T1=T2=T4 (4 Ticks Analysis) | Barrier: T1 (Always) | DELAYED Martingale x' + martingale_multiplier|string + ' (Max ' + max_consecutive_losses|string + ' Loss, Max Step ' + max_martingale_step|string + ')' %}
+    {% set strategy = 'Rise/Fall (5 Ticks) | Entry: Reversed Candle Pattern (2 Patterns) on 20 Ticks | Immediate REVERSED Martingale x' + martingale_multiplier|string + ' (Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string + ')' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <p>Account Type: {{ session_data.account_type.upper() }} | Currency: {{ session_data.currency }}</p>
@@ -591,7 +604,7 @@ CONTROL_FORM = """
     <p>Current Stake: {{ session_data.currency }} {{ session_data.current_stake|round(2) }}</p>
     <p style="font-weight: bold; color: {% if session_data.consecutive_losses > 0 %}red{% else %}green{% endif %};">
         Consecutive Losses: {{ session_data.consecutive_losses }} / {{ max_consecutive_losses }} 
-        {% if session_data.awaiting_martingale_signal %}(Martingale Awaiting Signal 🔍){% endif %}
+        (Last Direction: {{ session_data.last_trade_direction }})
     </p>
     <p style="font-weight: bold; color: green;">Total Wins: {{ session_data.total_wins }} | Total Losses: {{ session_data.total_losses }}</p>
     <p style="font-weight: bold; color: #007bff;">Current Strategy: {{ strategy }}</p>
@@ -700,7 +713,7 @@ def index():
         session_data['stop_reason'] = "Displayed"
         save_session_data(email, session_data)
     
-    contract_type_name = "Single DigitDiff (T1=T2=T4)"
+    contract_type_name = "Rise/Fall (4 Reversed Candles, 20 Ticks)"
 
     return render_template_string(CONTROL_FORM,
         email=email,
@@ -779,7 +792,7 @@ def start_bot():
     with PROCESS_LOCK: active_processes[email] = process
     
     # 💡 تحديث وصف الاستراتيجية في رسالة Flash
-    flash(f'Bot started successfully. Strategy: Single DigitDiff on T1=T2=T4 (4 Ticks Analysis) / Barrier: T1 (Always) / DELAYED Martingale x{MARTINGALE_MULTIPLIER} (Max {MAX_CONSECUTIVE_LOSSES} Loss, Max Step {MAX_MARTINGALE_STEP}).', 'success')
+    flash(f'Bot started successfully. Strategy: Rise/Fall (5 Ticks) on Reversed Candle Pattern / Immediate REVERSED Martingale x{MARTINGALE_MULTIPLIER} (Max {MAX_CONSECUTIVE_LOSSES} Losses, Max Step {MAX_MARTINGALE_STEP}).', 'success')
     return redirect(url_for('index'))
 
 @app.route('/stop', methods=['POST'])
@@ -806,7 +819,6 @@ def logout():
 
 
 if __name__ == '__main__':
-    # إيقاف أي عمليات سابقة معلقة عند بدء تشغيل الخادم
     all_sessions = load_persistent_sessions()
     for email in list(all_sessions.keys()):
         stop_bot(email, clear_data=False, stop_reason="Disconnected (Auto-Retry)")
