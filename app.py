@@ -20,7 +20,7 @@ MAX_CONSECUTIVE_LOSSES = 5
 RECONNECT_DELAY = 1      
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
-TICK_HISTORY_SIZE = 15 
+TICK_HISTORY_SIZE = 25 # 5 candles * 5 ticks = 25
 MARTINGALE_MULTIPLIER = 2.2 
 # ==========================================================
 
@@ -294,7 +294,7 @@ def check_pnl_limits(email, profit_loss, trade_type):
         
     if profit_loss < 0 and current_data['is_running']:
         # 💡 الدخول الفوري هنا!
-        re_enter_trade(email, last_stake) 
+        re_enter_trade(email, last_stake) # المضاعفة تعكس اتجاه الصفقة الخاسرة
         return
     
     # إذا كانت الصفقة ربح (profit_loss > 0) أو لم يحدث دخول فوري، نغلق حالة العقد
@@ -370,6 +370,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
             print(f"✅ [PROCESS] Connection established for {email}.")
             
         def is_rising(ticks):
+            """يحدد ما إذا كانت الشمعة (5 تيك) صاعدة (الإغلاق > الافتتاح)"""
             if len(ticks) < 5: return False
             return ticks[-1] > ticks[0] 
 
@@ -405,8 +406,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 if is_contract_open.get(email) is True: 
                     return 
                 
-                # 2. 💡 التعديل الحاسم: إذا كنا في خطوة مضاعفة، نتجاهل شروط النمط والوقت
-                # ونعتمد فقط على أمر الدخول الفوري الذي يتم إطلاقه من دالة check_pnl_limits
+                # 2. إذا كنا في خطوة مضاعفة، نتجاهل شروط النمط والوقت (دخول فوري بعد الخسارة)
                 if current_data['current_step'] > 0:
                     return 
                     
@@ -415,26 +415,34 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 # 3. منطق الدخول الأولي (فقط عندما current_step = 0)
                 if time_since_last_entry >= 14 and is_entry_time: 
                     
-                    if len(current_data['tick_history']) < TICK_HISTORY_SIZE:
+                    if len(current_data['tick_history']) < TICK_HISTORY_SIZE: 
                         return 
 
                     tick_history = current_data['tick_history']
-                    # تحليل الشموع (كل 5 تيكس)
+                    
+                    # تقسيم الـ 25 تيك إلى 5 شموع (كل شمعة 5 تيك)
                     candlestick_1 = tick_history[0:5]
                     candlestick_2 = tick_history[5:10]
                     candlestick_3 = tick_history[10:15]
+                    candlestick_4 = tick_history[15:20]
+                    candlestick_5 = tick_history[20:25]
                     
                     c1_rising = is_rising(candlestick_1)
                     c2_rising = is_rising(candlestick_2)
                     c3_rising = is_rising(candlestick_3)
+                    c4_rising = is_rising(candlestick_4)
+                    c5_rising = is_rising(candlestick_5)
 
                     contract_type_to_use = None
                     
-                    # نمط صعود/هبوط/صعود -> دخول CALL
-                    if c1_rising and not c2_rising and c3_rising:
+                    # 💡 النمط 1: صعود، هبوط، صعود، هبوط، صعود (R, F, R, F, R)
+                    # الزخم النهائي: صعود (c5_rising). -> دخول CALL (متابعة).
+                    if (c1_rising and not c2_rising and c3_rising and not c4_rising and c5_rising):
                         contract_type_to_use = "CALL"
-                    # نمط هبوط/صعود/هبوط -> دخول PUT
-                    elif not c1_rising and c2_rising and not c3_rising:
+                        
+                    # 💡 النمط 2: هبوط، صعود، هبوط، صعود، هبوط (F, R, F, R, F)
+                    # الزخم النهائي: هبوط (not c5_rising). -> دخول PUT (متابعة).
+                    elif (not c1_rising and c2_rising and not c3_rising and c4_rising and not c5_rising):
                         contract_type_to_use = "PUT"
                         
                     if contract_type_to_use is None:
@@ -453,7 +461,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 contract_id = data['buy']['contract_id']
                 
                 current_data = get_session_data(email)
-                # 💡 حفظ ID الصفقة لغرض الاستعادة
+                # حفظ ID الصفقة لغرض الاستعادة
                 current_data['open_contract_id'] = str(contract_id) 
                 save_session_data(email, current_data)
                 
@@ -465,7 +473,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                     trade_type = contract.get('contract_type')
                     
                     current_data = get_session_data(email)
-                    # 💡 مسح ID الصفقة لأنها بيعت
+                    # مسح ID الصفقة لأنها بيعت
                     current_data['open_contract_id'] = None
                     save_session_data(email, current_data) 
                     
@@ -587,7 +595,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = 'Rise/Fall (5 Ticks) | Entry: Reversed Candle Pattern | Immediate REVERSED Martingale x' + martingale_multiplier|string + ' (Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string + ')' %}
+    {% set strategy = 'Rise/Fall (5 Ticks) | Entry: 5-Candle Alternating Pattern (Follow) | Immediate REVERSED Martingale x' + martingale_multiplier|string + ' (Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string + ')' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <div class="data-box">
