@@ -9,19 +9,19 @@ from flask import Flask, request, render_template_string, redirect, url_for, ses
 from datetime import datetime, timezone
 
 # ==========================================================
-# BOT CONSTANT SETTINGS
+# BOT CONSTANT SETTINGS (UPDATED)
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929" 
-SYMBOL = "R_75"        
-DURATION = 3            # 🌟 تم التعديل إلى 1 تيك
+SYMBOL = "R_100"        
+DURATION = 1            # 1 تيك
 DURATION_UNIT = "t"     
-MARTINGALE_STEPS = 4    
-MAX_CONSECUTIVE_LOSSES = 5 
+MARTINGALE_STEPS = 1    # 🌟 خطوة مضاعفة واحدة فقط
+MAX_CONSECUTIVE_LOSSES = 2 # 🌟 الحد الأقصى للخسائر المتتالية
 RECONNECT_DELAY = 1      
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
 TICK_HISTORY_SIZE = 0 
-MARTINGALE_MULTIPLIER = 2.2 
+MARTINGALE_MULTIPLIER = 14.0 # 🌟 المضاعف الجديد
 CANDLE_TICK_SIZE = 0   
 # الثواني تم تجاهلها للدخول الفوري ولكنها لا تزال موجودة
 SYNC_SECONDS = [0, 14, 30, 44] 
@@ -36,7 +36,8 @@ manager = multiprocessing.Manager()
 active_ws = {} 
 is_contract_open = manager.dict() 
 
-TRADE_STATE_DEFAULT = {"type": "DIGITEVEN"} 
+# تبقى الصفقة الافتراضية كما هي: DIGITDIFF 5
+TRADE_STATE_DEFAULT = {"type": "DIGITDIFF", "target_digit": 5} 
 
 DEFAULT_SESSION_STATE = {
     "api_token": "",
@@ -55,14 +56,14 @@ DEFAULT_SESSION_STATE = {
     "last_entry_price": 0.0,      
     "last_tick_data": None,       
     "tick_history": [],
-    "last_losing_trade_type": "DIGITEVEN",
+    "last_losing_trade_type": "DIGITDIFF", 
     "open_contract_id": None, 
     "account_type": "demo", 
     "currency": "USD",
     "pending_time_signal": None,
     "pending_martingale": False, 
     "martingale_stake": 0.0,     
-    "martingale_type": "DIGITEVEN",   
+    "martingale_type": "DIGITDIFF",   
 }
 # ==========================================================
 
@@ -196,9 +197,10 @@ def calculate_martingale_stake(base_stake, current_step):
         return base_stake
     # المضاعفة تحدث فقط في الخطوات المسموحة
     if current_step <= MARTINGALE_STEPS:
+        # استخدام MARTINGALE_MULTIPLIER المحدث (14.0)
         return base_stake * (MARTINGALE_MULTIPLIER ** current_step) 
     else:
-        # إذا تجاوزنا الحد الأقصى للخطوات، نبدأ من جديد بالرهان الأساسي
+        # تجاوز الحد الأقصى للخطوات، نبدأ من جديد بالرهان الأساسي
         return base_stake
 
 def send_trade_order(email, stake, contract_type, currency_code):
@@ -208,14 +210,17 @@ def send_trade_order(email, stake, contract_type, currency_code):
     
     rounded_stake = round(stake, 2)
     
-    # تحديد معامل الصفقة الخاص بـ Even/Odd
-    # ملاحظة: سيتم دائمًا الدخول بـ DIGITEVEN في هذه الاستراتيجية المحددة
-    if contract_type == "DIGITEVEN":
-        # 🌟 استخدام DURATION الجديد (1 تيك)
-        contract_param = {"duration": DURATION, "duration_unit": DURATION_UNIT, "symbol": SYMBOL, "contract_type": "DIGITEVEN"}
+    # تحديد معامل الصفقة الخاص بـ DIGITDIFF 5
+    if contract_type == "DIGITDIFF":
+        contract_param = {
+            "duration": DURATION, 
+            "duration_unit": DURATION_UNIT, 
+            "symbol": SYMBOL, 
+            "contract_type": "DIGITDIFF",
+            "barrier": 5 # الرقم الذي يجب أن يكون مختلفاً
+        }
     else:
-        # إذا كانت الإشارة ليست DIGITEVEN، لن ندخل أساسًا، لكن هذا للاحتياط
-        print(f"❌ [TRADE ERROR] Invalid contract type for Even Only strategy: {contract_type}")
+        print(f"❌ [TRADE ERROR] Invalid contract type for DIGITDIFF 5 strategy: {contract_type}")
         return
 
     trade_request = {
@@ -232,7 +237,7 @@ def send_trade_order(email, stake, contract_type, currency_code):
         ws_app.send(json.dumps(trade_request))
         # تعيين الحالة إلى True فوراً بعد إرسال الطلب لمنع الدخول المتعدد
         is_contract_open[email] = True 
-        print(f"💰 [TRADE] Sent {contract_type} ({currency_code}) with stake: {rounded_stake:.2f}")
+        print(f"💰 [TRADE] Sent {contract_type} 5 ({currency_code}) with stake: {rounded_stake:.2f}")
     except Exception as e:
         print(f"❌ [TRADE ERROR] Could not send trade order: {e}")
         pass
@@ -254,7 +259,7 @@ def check_pnl_limits(email, profit_loss, trade_type):
         current_data['current_step'] = 0 
         current_data['consecutive_losses'] = 0
         current_data['current_stake'] = current_data['base_stake']
-        current_data['last_losing_trade_type'] = "DIGITEVEN"
+        current_data['last_losing_trade_type'] = "DIGITDIFF" 
         current_data['pending_martingale'] = False # مسح حالة المضاعفة
         
         if current_data['current_profit'] >= current_data['tp_target']:
@@ -270,19 +275,21 @@ def check_pnl_limits(email, profit_loss, trade_type):
         # إعداد صفقة المضاعفة
         if current_data['current_step'] <= MARTINGALE_STEPS:
             new_stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
-            contract_type_to_use = "DIGITEVEN" 
+            contract_type_to_use = "DIGITDIFF" 
             
             # نحدد الرهان والنوع ونُفَعِّل حالة الانتظار
             current_data['current_stake'] = new_stake
             current_data['pending_martingale'] = True # تفعيل حالة الانتظار لحين ظهور 0
             current_data['martingale_stake'] = new_stake
             current_data['martingale_type'] = contract_type_to_use
-            print(f"⚠️ [MARTINGALE PENDING] Loss detected. Next trade: {contract_type_to_use} @ {new_stake:.2f}. Awaiting 4th digit = 0 to execute.")
+            # رسالة التنبيه تم تحديثها لتعكس الخطوات الجديدة: Max Step 1 = خسارتان متتاليتان
+            print(f"⚠️ [MARTINGALE PENDING] Loss detected. Next trade: {contract_type_to_use} 5 @ {new_stake:.2f}. Awaiting 2nd digit = 0 or 1 decimal digit tick to execute.")
         else:
-            # تجاوز الحد الأقصى للمضاعفة
+            # تجاوز الحد الأقصى للمضاعفة (Max Step 1 تجاوزت)
             current_data['current_stake'] = current_data['base_stake']
             current_data['pending_martingale'] = False
         
+        # 🌟 التحقق من الحد الأقصى للخسائر (2 فقط)
         if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES: 
             stop_triggered = "SL Reached"
             
@@ -307,44 +314,51 @@ def check_pnl_limits(email, profit_loss, trade_type):
     return current_data['pending_martingale'] 
 
 # ==========================================================
-# UTILITY FUNCTIONS FOR EVEN/ODD STRATEGY
+# UTILITY FUNCTIONS FOR DIGITDIFF STRATEGY
 # ==========================================================
 
-def get_even_odd_digit(price):
+def get_target_digit(price):
     """
-    يستخرج الرقم الرابع بعد الفاصلة، مع ضمان تنسيق السعر بـ 4 خانات عشرية.
+    يستخرج الرقم الثاني بعد الفاصلة، مع افتراض 0 إذا كان هناك رقم عشري واحد فقط.
     """
     try:
-        # يضمن 4 أرقام بعد الفاصلة، مع إضافة أصفار إذا لزم الأمر
-        price_str = f"{price:.4f}" 
+        # تحويل السعر إلى سلسلة نصية
+        price_str = str(price) 
         
         # فصل الجزء العشري
         if '.' in price_str:
             decimal_part = price_str.split('.')[-1]
-            if len(decimal_part) >= 4:
-                # الرقم الرابع بعد الفاصلة
-                return int(decimal_part[3])
+            
+            # الحالة 1: يوجد رقمان عشريان أو أكثر
+            if len(decimal_part) >= 2:
+                # الرقم الثاني بعد الفاصلة
+                return int(decimal_part[1]) 
+            
+            # الحالة 2: يوجد رقم عشري واحد فقط (افتراض أن الثاني هو 0)
+            elif len(decimal_part) == 1:
+                return 0 # المرونة المطلوبة
         
-        # هذا لن يحدث مع التنسيق أعلاه لكن للاحتياط
+        # في حالة عدم وجود جزء عشري
         return 0 
         
     except Exception as e:
-        print(f"❌ Error processing price for Even/Odd: {e}")
+        print(f"❌ Error processing price for Digit Check: {e}")
         return None 
 
-def get_signal_even_odd(price):
+def get_signal_digit_diff(price):
     """
-    يحدد الإشارة: DIGITEVEN فقط عندما يكون الرقم الرابع بعد الفاصلة يساوي 0.
+    يحدد الإشارة: DIGITDIFF 5 فقط عندما يكون الرقم الثاني بعد الفاصلة يساوي 0 (مع مرونة الرقم العشري الواحد).
     """
     
-    last_digit = get_even_odd_digit(price)
+    target_digit = get_target_digit(price)
     
-    if last_digit is None:
+    if target_digit is None:
         return None
         
-    # الشرط: الدخول Even فقط عندما يكون الرقم الرابع يساوي 0
-    if last_digit == 0:
-        return "DIGITEVEN"
+    # الشرط: الدخول DIGITDIFF (5) فقط عندما تكون القيمة المستخرجة 0
+    if target_digit == 0:
+        # الصفقة هي DIGITDIFF 5
+        return "DIGITDIFF" 
     else:
         # يتجاهل أي رقم آخر (1-9)
         return None 
@@ -381,7 +395,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         "last_entry_price": 0.0,
         "last_tick_data": None,
         "tick_history": [], 
-        "last_losing_trade_type": "DIGITEVEN",
+        "last_losing_trade_type": "DIGITDIFF",
         "open_contract_id": None,
         "account_type": account_type,
         "currency": currency_code,
@@ -393,7 +407,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         "pending_time_signal": None, 
         "pending_martingale": False, 
         "martingale_stake": 0.0, 
-        "martingale_type": "DIGITEVEN",
+        "martingale_type": "DIGITDIFF",
     })
     save_session_data(email, session_data)
 
@@ -445,7 +459,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
             save_session_data(email, current_data)
 
             send_trade_order(email, stake_to_use, contract_type_to_use, currency_code)
-            print("🚀 [MARTINGALE EXECUTION] Executed upon qualifying tick (4th digit = 0).")
+            print("🚀 [MARTINGALE EXECUTION] Executed upon qualifying tick (2nd digit = 0 or 1 decimal digit).")
         
         def on_message_wrapper(ws_app, message):
             data = json.loads(message)
@@ -483,11 +497,11 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                     if not is_time_gap_respected:
                         return
                     
-                    # الحصول على إشارة Even/Odd من التيك الحالي
-                    contract_type_to_use = get_signal_even_odd(current_price)
+                    # الحصول على إشارة DIGITDIFF 5 من التيك الحالي
+                    contract_type_to_use = get_signal_digit_diff(current_price)
                     
-                    # الشرط الأساسي: هل ظهر الرقم 0؟
-                    if contract_type_to_use == "DIGITEVEN":
+                    # الشرط الأساسي: هل تحقق شرط الرقم الثاني = 0 أو رقم عشري واحد؟
+                    if contract_type_to_use == "DIGITDIFF":
                         
                         if current_data['pending_martingale']:
                             # 🚀 حالة المضاعفة: التنفيذ الآن
@@ -507,7 +521,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                             save_session_data(email, current_data)
 
                             send_trade_order(email, stake_to_use, contract_type_to_use, current_data['currency'])
-                            print(f"🚀 [BASE EXECUTION] DIGITEVEN detected (4th digit is 0) and executed immediately ({stake_to_use:.2f}).")
+                            print(f"🚀 [BASE EXECUTION] DIGITDIFF 5 detected (2nd digit is 0 or 1 decimal) and executed immediately ({stake_to_use:.2f}).")
                             return
                         
                         # إذا لم تتحقق الإشارة، لا يوجد دخول.
@@ -652,8 +666,8 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set martingale_mode = 'Martingale (Same Direction: Even) Awaiting 4th Digit = 0' %}
-    {% set strategy = 'Even Only (4th Decimal Digit must be 0) | Market: ' + SYMBOL + ' | Duration: ' + DURATION|string + ' Tick | Analysis & Entry: Immediate upon 4th Digit = 0 | ' + martingale_mode + ' x' + martingale_multiplier|string + ' (Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string + ')' %}
+    {% set martingale_mode = 'Martingale (Same Direction: DIFF 5) Awaiting 2nd Digit = 0 OR 1 Decimal Digit Tick' %}
+        {% set strategy = 'DIGIT DIFF 5 (2nd Decimal Digit must be 0, flexible for 1 decimal) | Market: ' + SYMBOL + ' | Duration: ' + DURATION|string + ' Tick | Analysis & Entry: Immediate upon 2nd Digit = 0 or 1 decimal digit | Martingale x' + martingale_multiplier|string + ' (Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string + ')' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <div class="data-box">
@@ -668,8 +682,8 @@ CONTROL_FORM = """
         <p style="font-weight: bold; color: {% if session_data.pending_martingale %}#ff5733{% else %}#555{% endif %};">
             Pending Signal: 
             <b>
-                {% if session_data.pending_martingale %}1 (Martingale: {{ session_data.martingale_type }} @ {{ session_data.martingale_stake|round(2) }})
-                {% else %}0 (Awaiting next qualifying tick 4th digit = 0)
+                {% if session_data.pending_martingale %}1 (Martingale: {{ session_data.martingale_type }} 5 @ {{ session_data.martingale_stake|round(2) }})
+                {% else %}0 (Awaiting next qualifying tick: 2nd digit = 0 or 1 decimal digit)
                 {% endif %}
             </b>
         </p>
@@ -677,7 +691,7 @@ CONTROL_FORM = """
         <p>Current Stake: <b>{{ session_data.currency }} {{ session_data.current_stake|round(2) }}</b></p>
         <p style="font-weight: bold; color: {% if session_data.consecutive_losses > 0 %}red{% else %}green{% endif %};">
         Consecutive Losses: <b>{{ session_data.consecutive_losses }}</b> / {{ max_consecutive_losses }} 
-        (Last Direction: <b>{{ session_data.last_losing_trade_type }}</b>)
+        (Last Direction: <b>{{ session_data.last_losing_trade_type }} 5</b>)
         </p>
         <p style="font-weight: bold; color: green;">Total Wins: {{ session_data.total_wins }} | Total Losses: {{ session_data.total_losses }}</p>
         <p style="font-weight: bold; color: #007bff;">Current Strategy: {{ strategy }}</p>
