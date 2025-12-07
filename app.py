@@ -13,15 +13,16 @@ from datetime import datetime, timezone
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929" 
 SYMBOL = "R_100"       
-DURATION = 56           # 💡 تم التعديل: 56 ثانية
-DURATION_UNIT = "s"     # 💡 تم التعديل: وحدة المدة ثانية
-MARTINGALE_STEPS = 4    # تم الإبقاء: 4 خطوات مضاعفة
-MAX_CONSECUTIVE_LOSSES = 5 # تم الإبقاء: 5 خسائر متتالية (قبل التوقف)
+DURATION = 56           # 56 ثانية (مدة الصفقة)
+DURATION_UNIT = "s"     
+MARTINGALE_STEPS = 4    
+MAX_CONSECUTIVE_LOSSES = 5 
 RECONNECT_DELAY = 1      
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
-TICK_HISTORY_SIZE = 90 # 💡 تم التعديل: 3 شموع * 30 تيك = 90 تيك
+TICK_HISTORY_SIZE = 15 # 3 شموع * 5 تيك = 15 تيك
 MARTINGALE_MULTIPLIER = 2.2 
+CANDLE_TICK_SIZE = 5   # حجم الشمعة الواحدة 5 تيك
 # ==========================================================
 
 # ==========================================================
@@ -186,8 +187,9 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 def calculate_martingale_stake(base_stake, current_stake, current_step):
     if current_step == 0:
         return base_stake
+    # المضاعفة تحدث فقط في الخطوات المسموحة
     if current_step <= MARTINGALE_STEPS:
-        return current_stake * MARTINGALE_MULTIPLIER 
+        return base_stake * (MARTINGALE_MULTIPLIER ** current_step) 
     else:
         # إذا تجاوزنا الحد الأقصى للخطوات، نبدأ من جديد بالرهان الأساسي
         return base_stake
@@ -221,36 +223,28 @@ def send_trade_order(email, stake, contract_type, currency_code):
         print(f"❌ [TRADE ERROR] Could not send trade order: {e}")
         pass
 
-# 💡 الدالة المسؤولة عن الدخول الفوري بعد الخسارة
-def re_enter_trade(email, last_loss_stake):
+def calculate_next_trade_params(email):
     """
-    تحسب الرهان المضاعف، وتحدد الاتجاه المعكوس، وترسل أمر التداول فوراً.
+    تحسب الرهان المضاعف، وتحدد الاتجاه المعكوس بناءً على آخر خسارة.
     """
     current_data = get_session_data(email)
     
-    new_step = current_data['current_step']
-    last_losing_trade = current_data['last_losing_trade_type']
-
-    # 1. تحديد الرهان المضاعف
+    # 1. تحديد الرهان
+    current_step = current_data['current_step']
     new_stake = calculate_martingale_stake(
         current_data['base_stake'],
-        last_loss_stake,
-        new_step
+        current_data['current_stake'],
+        current_step
     )
-
-    # 2. تحديد الاتجاه المعكوس (Martingale Reversal)
+    
+    # 2. تحديد الاتجاه المعكوس
+    last_losing_trade = current_data['last_losing_trade_type']
     if last_losing_trade == "CALL":
         contract_type_to_use = "PUT"
     else: 
         contract_type_to_use = "CALL"
-
-    # 3. تحديث وحفظ بيانات الجلسة
-    current_data['current_stake'] = new_stake
-    current_data['current_trade_state']['type'] = contract_type_to_use 
-    save_session_data(email, current_data)
-
-    # 4. إرسال أمر الشراء الفوري 
-    send_trade_order(email, new_stake, contract_type_to_use, current_data['currency'])
+        
+    return new_stake, contract_type_to_use
 
 
 def check_pnl_limits(email, profit_loss, trade_type): 
@@ -265,21 +259,30 @@ def check_pnl_limits(email, profit_loss, trade_type):
     stop_triggered = False
 
     if profit_loss > 0:
+        # 🟢 ربح: إعادة تعيين العدادات والرهان الأساسي
         current_data['total_wins'] += 1
         current_data['current_step'] = 0 
         current_data['consecutive_losses'] = 0
         current_data['current_stake'] = current_data['base_stake']
-        current_data['last_losing_trade_type'] = "CALL" 
+        current_data['last_losing_trade_type'] = "CALL" # قيمة افتراضية للبدء
         
         if current_data['current_profit'] >= current_data['tp_target']:
             stop_triggered = "TP Reached"
             
     else:
+        # 🔴 خسارة: تحديث العدادات
         current_data['total_losses'] += 1
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1
-        
         current_data['last_losing_trade_type'] = trade_type
+        
+        # 💡 حساب الرهان الجديد لتخزينه، ولكن لا يتم الدخول به الآن
+        if current_data['current_step'] <= MARTINGALE_STEPS:
+            new_stake, _ = calculate_next_trade_params(email)
+            current_data['current_stake'] = new_stake
+        else:
+            # إذا تجاوزنا الحد الأقصى للمضاعفة، ننتظر التوقف أو نعود للأساسي
+            current_data['current_stake'] = current_data['base_stake']
         
         if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES: 
             stop_triggered = "SL Reached"
@@ -289,21 +292,14 @@ def check_pnl_limits(email, profit_loss, trade_type):
     
     if stop_triggered:
         stop_bot(email, clear_data=True, stop_reason=stop_triggered) 
-        is_contract_open[email] = False # إغلاق الحالة بعد التوقف
+        is_contract_open[email] = False 
         return 
         
-    if profit_loss < 0 and current_data['is_running']:
-        # 💡 الدخول الفوري هنا!
-        re_enter_trade(email, last_stake) 
-        return
-    
-    # إذا كانت الصفقة ربح (profit_loss > 0) أو لم يحدث دخول فوري، نغلق حالة العقد
-    is_contract_open[email] = False 
+    is_contract_open[email] = False # إغلاق الحالة للسماح بالدخول الجديد
 
     state = current_data['current_trade_state']
     rounded_last_stake = round(last_stake, 2)
     print(f"[LOG {email}] PNL: {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Last Stake: {rounded_last_stake:.2f}, State: {state['type']}")
-
 
 def bot_core_logic(email, token, stake, tp, account_type, currency_code):
     """ Main bot logic for a single user/session. """
@@ -369,10 +365,41 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
             save_session_data(email, running_data)
             print(f"✅ [PROCESS] Connection established for {email}.")
             
-        def is_rising(ticks):
-            """يحدد ما إذا كانت الشمعة (30 تيك) صاعدة (الإغلاق > الافتتاح)"""
-            if len(ticks) < 30: return False
-            return ticks[-1] > ticks[0] 
+        def get_candle_info(ticks):
+            """يستخرج الافتتاح (Open) والإغلاق (Close) من قائمة التيكات"""
+            if len(ticks) < CANDLE_TICK_SIZE: 
+                return None
+            open_price = ticks[0]
+            close_price = ticks[-1]
+            is_rising = close_price > open_price
+            return {"open": open_price, "close": close_price, "rising": is_rising}
+
+        def is_engulfing(candle_engulfing, candle_engulfed):
+            """
+            يتحقق مما إذا كانت الشمعة المبتلعة (candle_engulfing) 
+            ابتلعت بالكامل الشمعة السابقة (candle_engulfed)
+            """
+            if not candle_engulfing or not candle_engulfed:
+                return False
+                
+            c_e = candle_engulfing
+            c_d = candle_engulfed
+            
+            # يجب أن يكونا متعاكسين في الاتجاه
+            if c_e['rising'] == c_d['rising']:
+                return False
+                
+            if c_e['rising']:
+                # شمعة صاعدة تبتلع شمعة هابطة (Bullish Engulfing)
+                # إغلاق المبتلعة > افتتاح المبتلعة (صعود)
+                # افتتاح المبتلعة < إغلاق المبتلعة (هبوط)
+                return (c_e['close'] > c_d['open'] and c_e['open'] < c_d['close'])
+            else:
+                # شمعة هابطة تبتلع شمعة صاعدة (Bearish Engulfing)
+                # إغلاق المبتلعة < افتتاح المبتلعة (هبوط)
+                # افتتاح المبتلعة > إغلاق المبتلعة (صعود)
+                return (c_e['close'] < c_d['open'] and c_e['open'] > c_d['close'])
+
 
         def on_message_wrapper(ws_app, message):
             data = json.loads(message)
@@ -406,49 +433,74 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 # 1. إذا كان العقد مفتوحاً حالياً، نتجاهل أي إشارة دخول جديدة
                 if is_contract_open.get(email) is True: 
                     return 
-                
-                # 2. إذا كنا في خطوة مضاعفة، نتجاهل شروط النمط والوقت (دخول فوري بعد الخسارة)
-                if current_data['current_step'] > 0:
-                    return 
                     
                 time_since_last_entry = current_timestamp - current_data['last_entry_time']
                 
-                # 3. منطق الدخول الأولي (فقط عندما current_step = 0)
-                # نستخدم 56 ثانية كحد أدنى للوقت بين الصفقات
+                # 2. منطق الدخول (الأساسي أو المضاعف)
+                # نتحقق من الشروط: مضى وقت الصفقة (56 ثانية) + نحن عند الثانية 0
                 if time_since_last_entry >= DURATION and is_entry_time: 
                     
                     if len(current_data['tick_history']) < TICK_HISTORY_SIZE: 
                         return 
 
                     tick_history = current_data['tick_history']
+                    c_size = CANDLE_TICK_SIZE
                     
-                    # 💡 تقسيم الـ 90 تيك إلى 3 شموع (كل شمعة 30 تيك)
-                    candlestick_1 = tick_history[0:30]
-                    candlestick_2 = tick_history[30:60]
-                    candlestick_3 = tick_history[60:90]
+                    # 💡 تقسيم الـ 15 تيك إلى 3 شموع (كل شمعة 5 تيك)
+                    candlestick_1_ticks = tick_history[0:c_size]
+                    candlestick_2_ticks = tick_history[c_size:c_size*2]
+                    candlestick_3_ticks = tick_history[c_size*2:c_size*3]
                     
-                    c1_rising = is_rising(candlestick_1)
-                    c2_rising = is_rising(candlestick_2)
-                    c3_rising = is_rising(candlestick_3)
+                    c1_info = get_candle_info(candlestick_1_ticks)
+                    c2_info = get_candle_info(candlestick_2_ticks)
+                    c3_info = get_candle_info(candlestick_3_ticks)
 
+                    if not c1_info or not c2_info or not c3_info: return
+                    
+                    # 💡 الشرط الجديد: ابتلاع الشمعة الثالثة للثانية
+                    is_c3_engulfing_c2 = is_engulfing(c3_info, c2_info)
+
+                    pattern_detected = False
                     contract_type_to_use = None
                     
-                    # النمط 1: صعود، هبوط، صعود (V-shape) -> دخول CALL (متابعة)
-                    if (c1_rising and not c2_rising and c3_rising):
-                        contract_type_to_use = "CALL"
+                    if is_c3_engulfing_c2:
+                        # إذا حدث الابتلاع، نتجاهل الشمعة الأولى ونتبع اتجاه الشمعة المبتلعة (C3)
                         
-                    # النمط 2: هبوط، صعود، هبوط (A-shape) -> دخول PUT (متابعة)
-                    elif (not c1_rising and c2_rising and not c3_rising):
-                        contract_type_to_use = "PUT"
+                        if c3_info['rising']:
+                            # ابتلاع صعودي (Bullish Engulfing) -> ندخل CALL
+                            contract_type_to_use = "CALL"
+                        else:
+                            # ابتلاع هبوطي (Bearish Engulfing) -> ندخل PUT
+                            contract_type_to_use = "PUT"
                         
-                    if contract_type_to_use is None:
+                        pattern_detected = True
+                        
+                    if not pattern_detected:
                         return 
+
+                    # 3. تحديد الرهان والاتجاه بناءً على الخطوة الحالية
+                    
+                    if current_data['current_step'] == 0:
+                        # الدخول الأساسي
+                        stake_to_use = current_data['base_stake']
+                        # contract_type_to_use تم تحديده بالفعل بناءً على الابتلاع
                         
-                    stake_to_use = current_data['current_stake']
+                    elif current_data['current_step'] > 0 and current_data['current_step'] <= MARTINGALE_STEPS:
+                        # الدخول المضاعف (يجب أن يعكس اتجاه الصفقة الخاسرة السابقة)
+                        stake_to_use, intended_martingale_type = calculate_next_trade_params(email)
+                        
+                        # نستخدم الاتجاه المضاعف المعاكس للخسارة السابقة، بغض النظر عن النمط الحالي
+                        contract_type_to_use = intended_martingale_type
+
+                    else:
+                        # تجاوز خطوات المضاعفة
+                        return
+                        
                     entry_price = current_data['last_tick_data']['price']
                     current_data['last_entry_price'] = entry_price
                     current_data['last_entry_time'] = current_timestamp
                     current_data['current_trade_state']['type'] = contract_type_to_use 
+                    current_data['current_stake'] = stake_to_use 
                     save_session_data(email, current_data)
 
                     send_trade_order(email, stake_to_use, contract_type_to_use, current_data['currency'])
@@ -457,7 +509,6 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 contract_id = data['buy']['contract_id']
                 
                 current_data = get_session_data(email)
-                # حفظ ID الصفقة لغرض الاستعادة
                 current_data['open_contract_id'] = str(contract_id) 
                 save_session_data(email, current_data)
                 
@@ -469,11 +520,10 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                     trade_type = contract.get('contract_type')
                     
                     current_data = get_session_data(email)
-                    # مسح ID الصفقة لأنها بيعت
                     current_data['open_contract_id'] = None
                     save_session_data(email, current_data) 
                     
-                    # معالجة النتيجة وإطلاق المضاعفة الفورية (إذا كانت خسارة)
+                    # معالجة النتيجة، ولا يتم الدخول المضاعف إلا عند ظهور نمط جديد
                     check_pnl_limits(email, contract['profit'], trade_type) 
                     if 'subscription_id' in data: ws_app.send(json.dumps({"forget": data['subscription_id']}))
 
@@ -591,7 +641,8 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = '3-Candle V/A Pattern (30 Ticks/Candle) | Entry: Second 0 | Duration: 56s | Martingale REVERSED x' + martingale_multiplier|string + ' (Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string + ')' %}
+    {% set martingale_mode = 'Deferred Martingale (Awaits next pattern) | Reverse Last Loss' %}
+    {% set strategy = '3-Candle Engulfing Pattern (5 Ticks/Candle) | Entry: Second 0 | Duration: 56s | ' + martingale_mode + ' x' + martingale_multiplier|string + ' (Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string + ')' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <div class="data-box">
