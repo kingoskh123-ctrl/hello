@@ -13,14 +13,14 @@ from datetime import datetime, timezone
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929" 
 SYMBOL = "R_100"       
-DURATION = 5          
-DURATION_UNIT = "t" 
-MARTINGALE_STEPS = 4    
-MAX_CONSECUTIVE_LOSSES = 5 
+DURATION = 56           # 💡 تم التعديل: 56 ثانية
+DURATION_UNIT = "s"     # 💡 تم التعديل: وحدة المدة ثانية
+MARTINGALE_STEPS = 4    # تم الإبقاء: 4 خطوات مضاعفة
+MAX_CONSECUTIVE_LOSSES = 5 # تم الإبقاء: 5 خسائر متتالية (قبل التوقف)
 RECONNECT_DELAY = 1      
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
-TICK_HISTORY_SIZE = 25 # 5 candles * 5 ticks = 25
+TICK_HISTORY_SIZE = 90 # 💡 تم التعديل: 3 شموع * 30 تيك = 90 تيك
 MARTINGALE_MULTIPLIER = 2.2 
 # ==========================================================
 
@@ -294,7 +294,7 @@ def check_pnl_limits(email, profit_loss, trade_type):
         
     if profit_loss < 0 and current_data['is_running']:
         # 💡 الدخول الفوري هنا!
-        re_enter_trade(email, last_stake) # المضاعفة تعكس اتجاه الصفقة الخاسرة
+        re_enter_trade(email, last_stake) 
         return
     
     # إذا كانت الصفقة ربح (profit_loss > 0) أو لم يحدث دخول فوري، نغلق حالة العقد
@@ -370,8 +370,8 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
             print(f"✅ [PROCESS] Connection established for {email}.")
             
         def is_rising(ticks):
-            """يحدد ما إذا كانت الشمعة (5 تيك) صاعدة (الإغلاق > الافتتاح)"""
-            if len(ticks) < 5: return False
+            """يحدد ما إذا كانت الشمعة (30 تيك) صاعدة (الإغلاق > الافتتاح)"""
+            if len(ticks) < 30: return False
             return ticks[-1] > ticks[0] 
 
         def on_message_wrapper(ws_app, message):
@@ -398,7 +398,8 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                     current_data['tick_history'] = current_data['tick_history'][-TICK_HISTORY_SIZE:]
                 
                 current_second = datetime.fromtimestamp(current_timestamp, tz=timezone.utc).second
-                is_entry_time = current_second in [0, 14, 30, 44] 
+                # 💡 توقيت الدخول: فقط عند الثانية 0
+                is_entry_time = current_second == 0 
                 
                 save_session_data(email, current_data) 
                 
@@ -413,36 +414,31 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 time_since_last_entry = current_timestamp - current_data['last_entry_time']
                 
                 # 3. منطق الدخول الأولي (فقط عندما current_step = 0)
-                if time_since_last_entry >= 14 and is_entry_time: 
+                # نستخدم 56 ثانية كحد أدنى للوقت بين الصفقات
+                if time_since_last_entry >= DURATION and is_entry_time: 
                     
                     if len(current_data['tick_history']) < TICK_HISTORY_SIZE: 
                         return 
 
                     tick_history = current_data['tick_history']
                     
-                    # تقسيم الـ 25 تيك إلى 5 شموع (كل شمعة 5 تيك)
-                    candlestick_1 = tick_history[0:5]
-                    candlestick_2 = tick_history[5:10]
-                    candlestick_3 = tick_history[10:15]
-                    candlestick_4 = tick_history[15:20]
-                    candlestick_5 = tick_history[20:25]
+                    # 💡 تقسيم الـ 90 تيك إلى 3 شموع (كل شمعة 30 تيك)
+                    candlestick_1 = tick_history[0:30]
+                    candlestick_2 = tick_history[30:60]
+                    candlestick_3 = tick_history[60:90]
                     
                     c1_rising = is_rising(candlestick_1)
                     c2_rising = is_rising(candlestick_2)
                     c3_rising = is_rising(candlestick_3)
-                    c4_rising = is_rising(candlestick_4)
-                    c5_rising = is_rising(candlestick_5)
 
                     contract_type_to_use = None
                     
-                    # 💡 النمط 1: صعود، هبوط، صعود، هبوط، صعود (R, F, R, F, R)
-                    # الزخم النهائي: صعود (c5_rising). -> دخول CALL (متابعة).
-                    if (c1_rising and not c2_rising and c3_rising and not c4_rising and c5_rising):
+                    # النمط 1: صعود، هبوط، صعود (V-shape) -> دخول CALL (متابعة)
+                    if (c1_rising and not c2_rising and c3_rising):
                         contract_type_to_use = "CALL"
                         
-                    # 💡 النمط 2: هبوط، صعود، هبوط، صعود، هبوط (F, R, F, R, F)
-                    # الزخم النهائي: هبوط (not c5_rising). -> دخول PUT (متابعة).
-                    elif (not c1_rising and c2_rising and not c3_rising and c4_rising and not c5_rising):
+                    # النمط 2: هبوط، صعود، هبوط (A-shape) -> دخول PUT (متابعة)
+                    elif (not c1_rising and c2_rising and not c3_rising):
                         contract_type_to_use = "PUT"
                         
                     if contract_type_to_use is None:
@@ -595,7 +591,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = 'Rise/Fall (5 Ticks) | Entry: 5-Candle Alternating Pattern (Follow) | Immediate REVERSED Martingale x' + martingale_multiplier|string + ' (Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string + ')' %}
+    {% set strategy = '3-Candle V/A Pattern (30 Ticks/Candle) | Entry: Second 0 | Duration: 56s | Martingale REVERSED x' + martingale_multiplier|string + ' (Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string + ')' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <div class="data-box">
