@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929" 
 SYMBOL = "R_75"        
-DURATION = 1            # 4 تيكات
+DURATION = 1            # 🌟 تم التعديل إلى 1 تيك
 DURATION_UNIT = "t"     
 MARTINGALE_STEPS = 4    
 MAX_CONSECUTIVE_LOSSES = 5 
@@ -23,7 +23,7 @@ ACTIVE_SESSIONS_FILE = "active_sessions.json"
 TICK_HISTORY_SIZE = 0 
 MARTINGALE_MULTIPLIER = 2.2 
 CANDLE_TICK_SIZE = 0   
-# ❌ تم تجاهل الثواني المسموحة لتنفيذ الصفقة (للدخول الفوري)
+# الثواني تم تجاهلها للدخول الفوري ولكنها لا تزال موجودة
 SYNC_SECONDS = [0, 14, 30, 44] 
 # ==========================================================
 
@@ -211,6 +211,7 @@ def send_trade_order(email, stake, contract_type, currency_code):
     # تحديد معامل الصفقة الخاص بـ Even/Odd
     # ملاحظة: سيتم دائمًا الدخول بـ DIGITEVEN في هذه الاستراتيجية المحددة
     if contract_type == "DIGITEVEN":
+        # 🌟 استخدام DURATION الجديد (1 تيك)
         contract_param = {"duration": DURATION, "duration_unit": DURATION_UNIT, "symbol": SYMBOL, "contract_type": "DIGITEVEN"}
     else:
         # إذا كانت الإشارة ليست DIGITEVEN، لن ندخل أساسًا، لكن هذا للاحتياط
@@ -253,31 +254,32 @@ def check_pnl_limits(email, profit_loss, trade_type):
         current_data['current_step'] = 0 
         current_data['consecutive_losses'] = 0
         current_data['current_stake'] = current_data['base_stake']
-        current_data['last_losing_trade_type'] = "DIGITEVEN" # الإشارة المعاكسة غير مستخدمة هنا
+        current_data['last_losing_trade_type'] = "DIGITEVEN"
         current_data['pending_martingale'] = False # مسح حالة المضاعفة
         
         if current_data['current_profit'] >= current_data['tp_target']:
             stop_triggered = "TP Reached"
             
     else:
-        # 🔴 خسارة: تحديث العدادات وتجهيز المضاعفة الفورية
+        # 🔴 خسارة: تحديث العدادات وتجهيز المضاعفة (التي ستنتظر تيك = 0)
         current_data['total_losses'] += 1
         current_data['consecutive_losses'] += 1
         current_data['current_step'] += 1
         current_data['last_losing_trade_type'] = trade_type
         
-        # إعداد صفقة المضاعفة الفورية
+        # إعداد صفقة المضاعفة
         if current_data['current_step'] <= MARTINGALE_STEPS:
             new_stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
-            # في هذه الاستراتيجية المحددة، المضاعفة تكون بنفس الاتجاه (DIGITEVEN)
             contract_type_to_use = "DIGITEVEN" 
             
+            # نحدد الرهان والنوع ونُفَعِّل حالة الانتظار
             current_data['current_stake'] = new_stake
-            current_data['pending_martingale'] = True # تفعيل حالة الانتظار
+            current_data['pending_martingale'] = True # تفعيل حالة الانتظار لحين ظهور 0
             current_data['martingale_stake'] = new_stake
             current_data['martingale_type'] = contract_type_to_use
-            print(f"⚠️ [MARTINGALE PENDING] Loss detected. Next trade: {contract_type_to_use} (Same direction) @ {new_stake:.2f}. Will execute immediately upon receiving contract result.")
+            print(f"⚠️ [MARTINGALE PENDING] Loss detected. Next trade: {contract_type_to_use} @ {new_stake:.2f}. Awaiting 4th digit = 0 to execute.")
         else:
+            # تجاوز الحد الأقصى للمضاعفة
             current_data['current_stake'] = current_data['base_stake']
             current_data['pending_martingale'] = False
         
@@ -295,14 +297,13 @@ def check_pnl_limits(email, profit_loss, trade_type):
         is_contract_open[email] = False 
         return 
         
-    # إغلاق الحالة المشتركة للسماح بالدخول الجديد (سواء مضاعفة أو دخول عادي)
+    # إغلاق الحالة المشتركة للسماح بالدخول الجديد (سواء انتظار مضاعفة أو دخول عادي)
     is_contract_open[email] = False 
 
     state = current_data['current_trade_state']
     rounded_last_stake = round(last_stake, 2)
     print(f"[LOG {email}] PNL: {current_data['current_profit']:.2f}, Step: {current_data['current_step']}, Last Stake: {rounded_last_stake:.2f}, State: {state['type']}")
     
-    # إرجاع ما إذا كانت المضاعفة جاهزة للتنفيذ الفوري
     return current_data['pending_martingale'] 
 
 # ==========================================================
@@ -426,16 +427,12 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
             save_session_data(email, running_data)
             print(f"✅ [PROCESS] Connection established for {email}.")
             
-        # دالة مساعدة لتنفيذ صفقة المضاعفة فوراً
+        
         def send_martingale_trade(email, current_data):
             stake_to_use = current_data['martingale_stake']
             contract_type_to_use = current_data['martingale_type']
             currency_code = current_data['currency']
             
-            if not current_data['last_tick_data']:
-                print("❌ [MARTINGALE ERROR] Cannot execute martingale: No last tick data.")
-                return
-
             entry_price = current_data['last_tick_data']['price']
             current_time_ms = time.time() * 1000
 
@@ -448,7 +445,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
             save_session_data(email, current_data)
 
             send_trade_order(email, stake_to_use, contract_type_to_use, currency_code)
-            print("🚀 [MARTINGALE EXECUTION] Executed immediately after contract loss notification (DIGITEVEN).")
+            print("🚀 [MARTINGALE EXECUTION] Executed upon qualifying tick (4th digit = 0).")
         
         def on_message_wrapper(ws_app, message):
             data = json.loads(message)
@@ -470,16 +467,13 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                     "timestamp": current_timestamp
                 }
                 current_seconds = datetime.fromtimestamp(current_timestamp).second
-                save_session_data(email, current_data) # حفظ بيانات التيك المحدثة
+                save_session_data(email, current_data) 
                 
                 
-                # 2. منطق التحليل والدخول (بدون قيد زمني)
+                # 2. منطق التحليل والدخول (مشروط بظهور 0 فقط، سواء دخول أساسي أو مضاعفة)
                 
-                # التحقق من أن البوت جاهز للدخول (لا توجد صفقة مفتوحة ولا صفقة مضاعفة معلقة)
-                if is_contract_open.get(email) is False and current_data['pending_martingale'] is False:
-                    
-                    # ❌ إلغاء شرط التوقيت: لن يتم فحص الثواني 
-                    # if current_seconds in SYNC_SECONDS: 
+                # التحقق من أن البوت جاهز للدخول
+                if is_contract_open.get(email) is False:
                     
                     current_time_ms = time.time() * 1000
                     time_since_last_entry_ms = current_time_ms - current_data['last_entry_time']
@@ -490,26 +484,31 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                         return
                     
                     # الحصول على إشارة Even/Odd من التيك الحالي
-                    # سترجع DIGITEVEN فقط إذا كان الرقم الرابع هو 0
                     contract_type_to_use = get_signal_even_odd(current_price)
                     
+                    # الشرط الأساسي: هل ظهر الرقم 0؟
                     if contract_type_to_use == "DIGITEVEN":
                         
-                        # تنفيذ الصفقة فوراً 
-                        stake_to_use = current_data['base_stake']
-                        entry_price = current_data['last_tick_data']['price']
+                        if current_data['pending_martingale']:
+                            # 🚀 حالة المضاعفة: التنفيذ الآن
+                            send_martingale_trade(email, current_data)
+                            return
+                        else:
+                            # 🚀 حالة الدخول الأساسي: التنفيذ الآن
+                            stake_to_use = current_data['base_stake']
+                            entry_price = current_data['last_tick_data']['price']
 
-                        # تحديث حالة البوت للدخول
-                        current_data['last_entry_price'] = entry_price
-                        current_data['last_entry_time'] = current_time_ms
-                        current_data['current_trade_state']['type'] = contract_type_to_use 
-                        current_data['current_stake'] = stake_to_use 
-                        
-                        save_session_data(email, current_data)
+                            # تحديث حالة البوت للدخول
+                            current_data['last_entry_price'] = entry_price
+                            current_data['last_entry_time'] = current_time_ms
+                            current_data['current_trade_state']['type'] = contract_type_to_use 
+                            current_data['current_stake'] = stake_to_use 
+                            
+                            save_session_data(email, current_data)
 
-                        send_trade_order(email, stake_to_use, contract_type_to_use, current_data['currency'])
-                        print(f"🚀 [SIGNAL EXECUTION] DIGITEVEN detected (4th digit is 0) and executed immediately ({stake_to_use:.2f}).")
-                        return
+                            send_trade_order(email, stake_to_use, contract_type_to_use, current_data['currency'])
+                            print(f"🚀 [BASE EXECUTION] DIGITEVEN detected (4th digit is 0) and executed immediately ({stake_to_use:.2f}).")
+                            return
                         
                         # إذا لم تتحقق الإشارة، لا يوجد دخول.
                                 
@@ -532,15 +531,11 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                     current_data['open_contract_id'] = None
                     save_session_data(email, current_data) 
                     
-                    # 3. معالجة النتيجة وإعداد المضاعفة
-                    martingale_ready = check_pnl_limits(email, profit_loss, trade_type) 
+                    # 3. معالجة النتيجة وإعداد المضاعفة (التي ستنتظر تيك = 0)
+                    check_pnl_limits(email, profit_loss, trade_type) 
                     if 'subscription_id' in data: ws_app.send(json.dumps({"forget": data['subscription_id']}))
                     
-                    # 4. تنفيذ المضاعفة فوراً إذا كانت خسارة
-                    if martingale_ready:
-                        # يجب إعادة تحميل البيانات للتأكد من أنها أحدث حالة بعد check_pnl_limits
-                        updated_data = get_session_data(email) 
-                        send_martingale_trade(email, updated_data)
+                    # لا تنفيذ فوري للمضاعفة هنا، فقط تحديث الحالة الانتظار في check_pnl_limits
 
 
             elif msg_type == 'authorize':
@@ -657,8 +652,8 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set martingale_mode = 'Instant Martingale (Same Direction: Even) immediately after Loss' %}
-    {% set strategy = 'Even Only (4th Decimal Digit must be 0) | Market: ' + SYMBOL + ' | Duration: ' + DURATION|string + ' Ticks | Analysis & Entry: Immediate upon Tick | ' + martingale_mode + ' x' + martingale_multiplier|string + ' (Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string + ')' %}
+    {% set martingale_mode = 'Martingale (Same Direction: Even) Awaiting 4th Digit = 0' %}
+    {% set strategy = 'Even Only (4th Decimal Digit must be 0) | Market: ' + SYMBOL + ' | Duration: ' + DURATION|string + ' Tick | Analysis & Entry: Immediate upon 4th Digit = 0 | ' + martingale_mode + ' x' + martingale_multiplier|string + ' (Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string + ')' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <div class="data-box">
@@ -673,8 +668,8 @@ CONTROL_FORM = """
         <p style="font-weight: bold; color: {% if session_data.pending_martingale %}#ff5733{% else %}#555{% endif %};">
             Pending Signal: 
             <b>
-                {% if session_data.pending_martingale %}1 (Martingale: {{ session_data.martingale_type }})
-                {% else %}0 (Awaiting next qualifying tick)
+                {% if session_data.pending_martingale %}1 (Martingale: {{ session_data.martingale_type }} @ {{ session_data.martingale_stake|round(2) }})
+                {% else %}0 (Awaiting next qualifying tick 4th digit = 0)
                 {% endif %}
             </b>
         </p>
