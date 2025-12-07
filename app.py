@@ -13,8 +13,8 @@ from datetime import datetime, timezone
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929" 
 SYMBOL = "R_100"       
-DURATION = 56           # 56 ثانية (مدة الصفقة)
-DURATION_UNIT = "s"     
+DURATION = 5           # 56 ثانية (مدة الصفقة)
+DURATION_UNIT = "t"     
 MARTINGALE_STEPS = 4    
 MAX_CONSECUTIVE_LOSSES = 5 
 RECONNECT_DELAY = 1      
