@@ -63,7 +63,7 @@ DEFAULT_SESSION_STATE = {
     "pending_time_signal": None,
     "pending_martingale": False, 
     "martingale_stake": 0.0,     
-    "martingale_type": "DIGITDIFF",   
+    "martingale_type": "DIGITOVER",   
 }
 # ==========================================================
 
@@ -211,13 +211,13 @@ def send_trade_order(email, stake, contract_type, currency_code):
     rounded_stake = round(stake, 2)
     
     # تحديد معامل الصفقة الخاص بـ DIGITDIFF 5
-    if contract_type == "DIGITDIFF":
+    if contract_type == "DIGITOVER":
         contract_param = {
             "duration": DURATION, 
             "duration_unit": DURATION_UNIT, 
             "symbol": SYMBOL, 
-            "contract_type": "DIGITDIFF",
-            "barrier": 5 # الرقم الذي يجب أن يكون مختلفاً
+            "contract_type": "DIGITOVER",
+            "barrier": 2 # الرقم الذي يجب أن يكون مختلفاً
         }
     else:
         print(f"❌ [TRADE ERROR] Invalid contract type for DIGITDIFF 5 strategy: {contract_type}")
@@ -259,7 +259,7 @@ def check_pnl_limits(email, profit_loss, trade_type):
         current_data['current_step'] = 0 
         current_data['consecutive_losses'] = 0
         current_data['current_stake'] = current_data['base_stake']
-        current_data['last_losing_trade_type'] = "DIGITDIFF" 
+        current_data['last_losing_trade_type'] = "DIGITOVER" 
         current_data['pending_martingale'] = False # مسح حالة المضاعفة
         
         if current_data['current_profit'] >= current_data['tp_target']:
@@ -275,15 +275,15 @@ def check_pnl_limits(email, profit_loss, trade_type):
         # إعداد صفقة المضاعفة
         if current_data['current_step'] <= MARTINGALE_STEPS:
             new_stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
-            contract_type_to_use = "DIGITDIFF" 
+            contract_type_to_use = "DIGITOVER" 
             
             # نحدد الرهان والنوع ونُفَعِّل حالة الانتظار
             current_data['current_stake'] = new_stake
             current_data['pending_martingale'] = True # تفعيل حالة الانتظار لحين ظهور 0
             current_data['martingale_stake'] = new_stake
             current_data['martingale_type'] = contract_type_to_use
-            # رسالة التنبيه تم تحديثها لتعكس الخطوات الجديدة: Max Step 1 = خسارتان متتاليتان
-            print(f"⚠️ [MARTINGALE PENDING] Loss detected. Next trade: {contract_type_to_use} 5 @ {new_stake:.2f}. Awaiting 2nd digit = 0 or 1 decimal digit tick to execute.")
+            # رسالة التنبيه تم تحديثها لتعكس الخطوات الجديدة: Max Step 3 = خسارتان متتاليتان
+            print(f"⚠️ [MARTINGALE PENDING] Loss detected. Next trade: {contract_type_to_use} 2 @ {new_stake:.2f}. Awaiting 2nd digit = 0 or 1 decimal digit tick to execute.")
         else:
             # تجاوز الحد الأقصى للمضاعفة (Max Step 1 تجاوزت)
             current_data['current_stake'] = current_data['base_stake']
@@ -347,7 +347,7 @@ def get_target_digit(price):
 
 def get_signal_digit_diff(price):
     """
-    يحدد الإشارة: DIGITDIFF 5 فقط عندما يكون الرقم الثاني بعد الفاصلة يساوي 0 (مع مرونة الرقم العشري الواحد).
+    يحدد الإشارة: DIGITOVER 2 فقط عندما يكون الرقم الثاني بعد الفاصلة يساوي 0 (مع مرونة الرقم العشري الواحد).
     """
     
     target_digit = get_target_digit(price)
@@ -358,7 +358,7 @@ def get_signal_digit_diff(price):
     # الشرط: الدخول DIGITDIFF (5) فقط عندما تكون القيمة المستخرجة 0
     if target_digit == 0:
         # الصفقة هي DIGITDIFF 5
-        return "DIGITDIFF" 
+        return "DIGITOVER" 
     else:
         # يتجاهل أي رقم آخر (1-9)
         return None 
@@ -395,7 +395,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         "last_entry_price": 0.0,
         "last_tick_data": None,
         "tick_history": [], 
-        "last_losing_trade_type": "DIGITDIFF",
+        "last_losing_trade_type": "DIGITOVER",
         "open_contract_id": None,
         "account_type": account_type,
         "currency": currency_code,
@@ -407,7 +407,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         "pending_time_signal": None, 
         "pending_martingale": False, 
         "martingale_stake": 0.0, 
-        "martingale_type": "DIGITDIFF",
+        "martingale_type": "DIGITOVER",
     })
     save_session_data(email, session_data)
 
@@ -498,10 +498,10 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                         return
                     
                     # الحصول على إشارة DIGITDIFF 5 من التيك الحالي
-                    contract_type_to_use = get_signal_digit_diff(current_price)
+                    contract_type_to_use = get_signal_digit_over(current_price)
                     
                     # الشرط الأساسي: هل تحقق شرط الرقم الثاني = 0 أو رقم عشري واحد؟
-                    if contract_type_to_use == "DIGITDIFF":
+                    if contract_type_to_use == "DIGITOVER":
                         
                         if current_data['pending_martingale']:
                             # 🚀 حالة المضاعفة: التنفيذ الآن
