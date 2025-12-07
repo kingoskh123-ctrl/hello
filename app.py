@@ -15,13 +15,13 @@ WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"        
 DURATION = 2            # 🌟 مدة الصفقة 2 تيك
 DURATION_UNIT = "t"     
-MARTINGALE_STEPS = 1    
-MAX_CONSECUTIVE_LOSSES = 2 
+MARTINGALE_STEPS = 3    
+MAX_CONSECUTIVE_LOSSES = 4 
 RECONNECT_DELAY = 1      
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
 TICK_HISTORY_SIZE = 1   # 🌟 نحتاج لتخزين آخر 1 تيك للتحليل (التيك الحالي)
-MARTINGALE_MULTIPLIER = 14.0 
+MARTINGALE_MULTIPLIER = 3.0 
 CANDLE_TICK_SIZE = 0   
 SYNC_SECONDS = [] 
 # ==========================================================
