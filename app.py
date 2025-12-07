@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929" 
 SYMBOL = "R_100"        
-DURATION = 1            # 1 تيك
+DURATION = 3            # 1 تيك
 DURATION_UNIT = "t"     
 MARTINGALE_STEPS = 1    # 🌟 خطوة مضاعفة واحدة فقط
 MAX_CONSECUTIVE_LOSSES = 2 # 🌟 الحد الأقصى للخسائر المتتالية
