@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929" 
 SYMBOL = "R_75"        
-DURATION = 4            # 4 تيكات
+DURATION = 1            # 4 تيكات
 DURATION_UNIT = "t"     
 MARTINGALE_STEPS = 4    
 MAX_CONSECUTIVE_LOSSES = 5 
