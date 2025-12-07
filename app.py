@@ -13,8 +13,8 @@ from datetime import datetime, timezone
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929" 
 SYMBOL = "R_100"       
-DURATION = 5           # 56 ثانية (مدة الصفقة)
-DURATION_UNIT = "t"     
+DURATION = 5            # 5 تيكات (مدة الصفقة)
+DURATION_UNIT = "t"     # تغيرت إلى تيك (t)
 MARTINGALE_STEPS = 4    
 MAX_CONSECUTIVE_LOSSES = 5 
 RECONNECT_DELAY = 1      
@@ -210,7 +210,7 @@ def send_trade_order(email, stake, contract_type, currency_code):
             "contract_type": contract_type, 
             "currency": currency_code, 
             "duration": DURATION,
-            "duration_unit": DURATION_UNIT, 
+            "duration_unit": DURATION_UNIT, # 💡 تم التعديل إلى "t"
             "symbol": SYMBOL
         }
     }
@@ -225,7 +225,7 @@ def send_trade_order(email, stake, contract_type, currency_code):
 
 def calculate_next_trade_params(email):
     """
-    تحسب الرهان المضاعف، وتحدد الاتجاه المعكوس بناءً على آخر خسارة.
+    تحسب الرهان المضاعف، وتحدد الاتجاه المعكوس بناءً على آخر خسارة (الاتجاه المعكوس هنا لن يستخدم).
     """
     current_data = get_session_data(email)
     
@@ -237,7 +237,7 @@ def calculate_next_trade_params(email):
         current_step
     )
     
-    # 2. تحديد الاتجاه المعكوس
+    # 2. تحديد الاتجاه المعكوس (يتم إرجاعه ولكن لن يستخدم في المنطق الجديد)
     last_losing_trade = current_data['last_losing_trade_type']
     if last_losing_trade == "CALL":
         contract_type_to_use = "PUT"
@@ -424,25 +424,25 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 if len(current_data['tick_history']) > TICK_HISTORY_SIZE:
                     current_data['tick_history'] = current_data['tick_history'][-TICK_HISTORY_SIZE:]
                 
-                current_second = datetime.fromtimestamp(current_timestamp, tz=timezone.utc).second
-                # 💡 توقيت الدخول: فقط عند الثانية 0
-                is_entry_time = current_second == 0 
+                # 💡 في حالة التداول بالتيكات، لا نعتمد على الثانية 0 كشرط أساسي للدخول 
+                # بل نعتمد على ظهور نمط الابتلاع عند وصول التيك الخامس عشر (TICK_HISTORY_SIZE)
                 
+                is_pattern_ready = len(current_data['tick_history']) == TICK_HISTORY_SIZE
+                
+                # يجب أن نضمن وجود فاصل زمني كافٍ لمنع تكرار الدخول في نفس اللحظة (حوالي ثانية واحدة)
+                current_time_ms = time.time() * 1000
+                time_since_last_entry_ms = current_time_ms - current_data['last_entry_time']
+                is_time_gap_respected = time_since_last_entry_ms > 1000 # 1 ثانية كفاصل
+
                 save_session_data(email, current_data) 
                 
                 # 1. إذا كان العقد مفتوحاً حالياً، نتجاهل أي إشارة دخول جديدة
                 if is_contract_open.get(email) is True: 
                     return 
                     
-                time_since_last_entry = current_timestamp - current_data['last_entry_time']
-                
                 # 2. منطق الدخول (الأساسي أو المضاعف)
-                # نتحقق من الشروط: مضى وقت الصفقة (56 ثانية) + نحن عند الثانية 0
-                if time_since_last_entry >= DURATION and is_entry_time: 
+                if is_pattern_ready and is_time_gap_respected: 
                     
-                    if len(current_data['tick_history']) < TICK_HISTORY_SIZE: 
-                        return 
-
                     tick_history = current_data['tick_history']
                     c_size = CANDLE_TICK_SIZE
                     
@@ -457,14 +457,14 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
 
                     if not c1_info or not c2_info or not c3_info: return
                     
-                    # 💡 الشرط الجديد: ابتلاع الشمعة الثالثة للثانية
+                    # 💡 الشرط: ابتلاع الشمعة الثالثة للثانية
                     is_c3_engulfing_c2 = is_engulfing(c3_info, c2_info)
 
                     pattern_detected = False
                     contract_type_to_use = None
                     
                     if is_c3_engulfing_c2:
-                        # إذا حدث الابتلاع، نتجاهل الشمعة الأولى ونتبع اتجاه الشمعة المبتلعة (C3)
+                        # إذا حدث الابتلاع، نتبع اتجاه الشمعة المبتلعة (C3)
                         
                         if c3_info['rising']:
                             # ابتلاع صعودي (Bullish Engulfing) -> ندخل CALL
@@ -486,11 +486,12 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                         # contract_type_to_use تم تحديده بالفعل بناءً على الابتلاع
                         
                     elif current_data['current_step'] > 0 and current_data['current_step'] <= MARTINGALE_STEPS:
-                        # الدخول المضاعف (يجب أن يعكس اتجاه الصفقة الخاسرة السابقة)
-                        stake_to_use, intended_martingale_type = calculate_next_trade_params(email)
+                        # الدخول المضاعف يتبع التحليل الجديد
                         
-                        # نستخدم الاتجاه المضاعف المعاكس للخسارة السابقة، بغض النظر عن النمط الحالي
-                        contract_type_to_use = intended_martingale_type
+                        # 1. حساب الرهان المضاعف (نحن بحاجة إلى قيمة الرهان فقط)
+                        stake_to_use, _ = calculate_next_trade_params(email)
+                        
+                        # 2. اتجاه الدخول (contract_type_to_use) يبقى كما هو، بناءً على نمط الابتلاع الجديد
 
                     else:
                         # تجاوز خطوات المضاعفة
@@ -498,7 +499,8 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                         
                     entry_price = current_data['last_tick_data']['price']
                     current_data['last_entry_price'] = entry_price
-                    current_data['last_entry_time'] = current_timestamp
+                    # 💡 تخزين الوقت الحالي بالمللي ثانية لضمان الفاصل
+                    current_data['last_entry_time'] = current_time_ms
                     current_data['current_trade_state']['type'] = contract_type_to_use 
                     current_data['current_stake'] = stake_to_use 
                     save_session_data(email, current_data)
@@ -641,8 +643,8 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set martingale_mode = 'Deferred Martingale (Awaits next pattern) | Reverse Last Loss' %}
-    {% set strategy = '3-Candle Engulfing Pattern (5 Ticks/Candle) | Entry: Second 0 | Duration: 56s | ' + martingale_mode + ' x' + martingale_multiplier|string + ' (Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string + ')' %}
+    {% set martingale_mode = 'Deferred Martingale (Awaits next Engulfing pattern) | Direction Follows New Analysis' %}
+    {% set strategy = '3-Candle Engulfing Pattern (5 Ticks/Candle) | Duration: 5 Ticks | ' + martingale_mode + ' x' + martingale_multiplier|string + ' (Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string + ')' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <div class="data-box">
