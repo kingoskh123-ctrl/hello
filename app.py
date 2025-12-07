@@ -15,8 +15,8 @@ WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"       
 DURATION = 5          
 DURATION_UNIT = "t" 
-MARTINGALE_STEPS = 4    
-MAX_CONSECUTIVE_LOSSES = 5 
+MARTINGALE_STEPS = 0    
+MAX_CONSECUTIVE_LOSSES = 1 
 RECONNECT_DELAY = 1      
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
