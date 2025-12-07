@@ -13,15 +13,15 @@ from datetime import datetime, timezone
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929" 
 SYMBOL = "R_100"        
-DURATION = 3            # 1 تيك
+DURATION = 2            # 1 تيك
 DURATION_UNIT = "t"     
-MARTINGALE_STEPS = 1    # 🌟 خطوة مضاعفة واحدة فقط
-MAX_CONSECUTIVE_LOSSES = 2 # 🌟 الحد الأقصى للخسائر المتتالية
+MARTINGALE_STEPS = 3    # 🌟 خطوة مضاعفة واحدة فقط
+MAX_CONSECUTIVE_LOSSES = 4 # 🌟 الحد الأقصى للخسائر المتتالية
 RECONNECT_DELAY = 1      
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
 TICK_HISTORY_SIZE = 0 
-MARTINGALE_MULTIPLIER = 14.0 # 🌟 المضاعف الجديد
+MARTINGALE_MULTIPLIER = 3.0 # 🌟 المضاعف الجديد
 CANDLE_TICK_SIZE = 0   
 # الثواني تم تجاهلها للدخول الفوري ولكنها لا تزال موجودة
 SYNC_SECONDS = [0, 14, 30, 44] 
@@ -37,7 +37,7 @@ active_ws = {}
 is_contract_open = manager.dict() 
 
 # تبقى الصفقة الافتراضية كما هي: DIGITDIFF 5
-TRADE_STATE_DEFAULT = {"type": "DIGITDIFF", "target_digit": 5} 
+TRADE_STATE_DEFAULT = {"type": "DIGITOVER", "target_digit": 2} 
 
 DEFAULT_SESSION_STATE = {
     "api_token": "",
