@@ -9,18 +9,18 @@ from flask import Flask, request, render_template_string, redirect, url_for, ses
 from datetime import datetime, timezone
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (UPDATED FOR 2 TICKS ANALYSIS: T1=2, T2=9)
+# BOT CONSTANT SETTINGS (1-TICK DURATION, 3-TICK ANALYSIS)
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929" 
 SYMBOL = "R_100"        
-DURATION = 1            # مدة الصفقة: 2 تيك
+DURATION = 1            # مدة الصفقة: 1 تيك
 DURATION_UNIT = "t"     
 MARTINGALE_STEPS = 2    
 MAX_CONSECUTIVE_LOSSES = 3 
 RECONNECT_DELAY = 1      
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
-TICK_HISTORY_SIZE = 2   # تحليل 2 تيكات
+TICK_HISTORY_SIZE = 3   # تحليل 3 تيكات
 MARTINGALE_MULTIPLIER = 4.0 
 CANDLE_TICK_SIZE = 0   
 SYNC_SECONDS = [] 
@@ -201,14 +201,14 @@ def send_trade_order(email, stake, contract_type, currency_code):
     
     rounded_stake = round(stake, 2)
     
-    # مدة الصفقة: 2 تيك
+    # مدة الصفقة: 1 تيك
     if contract_type == "DIGITOVER":
         contract_param = {
-            "duration": DURATION,  # DURATION = 2
+            "duration": DURATION,  # DURATION = 1
             "duration_unit": DURATION_UNIT, 
             "symbol": SYMBOL, 
             "contract_type": "DIGITOVER",
-            "barrier": 2 
+            "barrier": 2 # الحفاظ على Digit Over 2
         }
     else:
         print(f"❌ [TRADE ERROR] Invalid contract type for DIGITOVER 2 strategy: {contract_type}")
@@ -270,7 +270,7 @@ def check_pnl_limits(email, profit_loss, trade_type):
             current_data['pending_martingale'] = True 
             current_data['martingale_stake'] = new_stake
             current_data['martingale_type'] = contract_type_to_use
-            print(f"⚠️ [MARTINGALE PENDING] Loss detected. Next trade: {contract_type_to_use} 2 @ {new_stake:.2f}. Awaiting T1=2 & T2=9 condition.")
+            print(f"⚠️ [MARTINGALE PENDING] Loss detected. Next trade: {contract_type_to_use} 2 @ {new_stake:.2f}. Awaiting T1(0|1) & T2(0|1) & T3(7|8) condition.")
         else:
             current_data['current_stake'] = current_data['base_stake']
             current_data['pending_martingale'] = False
@@ -296,7 +296,7 @@ def check_pnl_limits(email, profit_loss, trade_type):
     return current_data['pending_martingale'] 
 
 # ==========================================================
-# UTILITY FUNCTIONS FOR 2-TICK ANALYSIS (MODIFIED FOR T1=2, T2=9)
+# UTILITY FUNCTIONS FOR 3-TICK ANALYSIS (Kept the analysis logic)
 # ==========================================================
 
 def get_target_digit(price):
@@ -319,36 +319,46 @@ def get_target_digit(price):
         print(f"❌ Error processing price for Digit Check: {e}")
         return None 
 
-def get_signal_2_tick_analysis(tick_history):
+def get_signal_3_tick_analysis(tick_history):
     """
-    يحدد الإشارة: T1 = 2 و T2 = 9.
+    يحدد الإشارة بناءً على تحليل 3 تيكات:
+    T1 (الأقدم): 0 أو 1
+    T2 (الوسط): 0 أو 1
+    T3 (الأحدث): 7 أو 8
     """
     
-    # يجب أن يكون لدينا 2 تيكات على الأقل
-    if len(tick_history) < TICK_HISTORY_SIZE: # TICK_HISTORY_SIZE = 2
+    # يجب أن يكون لدينا 3 تيكات على الأقل
+    if len(tick_history) < TICK_HISTORY_SIZE: # TICK_HISTORY_SIZE = 3
         return None 
 
-    # التيكات مرتبة من الأقدم إلى الأحدث: T1, T2
-    # T1: الأقدم (index -2)
-    digit_t1 = get_target_digit(tick_history[-2]['price'])
+    # التيكات مرتبة من الأقدم إلى الأحدث: T1, T2, T3
     
-    # T2: الأحدث (index -1)
-    digit_t2 = get_target_digit(tick_history[-1]['price'])
+    # T1: الأقدم (index -3)
+    digit_t1 = get_target_digit(tick_history[-3]['price'])
     
-    # الشرط 1: T1 يساوي 2
-    cond_t1 = (digit_t1 == 2)
+    # T2: الوسط (index -2)
+    digit_t2 = get_target_digit(tick_history[-2]['price'])
     
-    # الشرط 2: T2 يساوي 9
-    cond_t2 = (digit_t2 == 9)
+    # T3: الأحدث (index -1)
+    digit_t3 = get_target_digit(tick_history[-1]['price'])
     
-    # الإشارة تتحقق عند تحقق الشرطين
-    if cond_t1 and cond_t2: 
+    # الشرط 1: T1 يكون 0 أو 1
+    cond_t1 = (digit_t1 in [0, 1])
+    
+    # الشرط 2: T2 يكون 0 أو 1
+    cond_t2 = (digit_t2 in [0, 1])
+    
+    # الشرط 3: T3 يكون 7 أو 8
+    cond_t3 = (digit_t3 in [7, 8])
+    
+    # الإشارة تتحقق عند تحقق الشروط الثلاثة
+    if cond_t1 and cond_t2 and cond_t3: 
         return "DIGITOVER" 
     else:
         return None
 
 # ==========================================================
-# CORE BOT LOGIC (Remains similar to the 2-tick direct entry logic)
+# CORE BOT LOGIC (Updated to use the new analysis function)
 # ==========================================================
 
 def bot_core_logic(email, token, stake, tp, account_type, currency_code):
@@ -446,7 +456,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
             save_session_data(email, current_data)
 
             send_trade_order(email, stake_to_use, contract_type_to_use, currency_code)
-            print(f"🚀 [TRADE EXECUTION] Executed upon T1=2 & T2=9 condition. Duration: {DURATION} Ticks.")
+            print(f"🚀 [TRADE EXECUTION] Executed upon T1(0|1) & T2(0|1) & T3(7|8) condition. Duration: {DURATION} Ticks.")
         
         def on_message_wrapper(ws_app, message):
             data = json.loads(message)
@@ -469,7 +479,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 }
                 current_data['last_tick_data'] = tick_data
                 
-                # تحديث سجل التيكات (نحتفظ بـ 2 تيكات)
+                # تحديث سجل التيكات (نحتفظ بـ 3 تيكات)
                 current_data['tick_history'].append(tick_data)
                 if len(current_data['tick_history']) > TICK_HISTORY_SIZE: 
                     current_data['tick_history'] = current_data['tick_history'][-TICK_HISTORY_SIZE:]
@@ -486,18 +496,18 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                         save_session_data(email, current_data) 
                         return
                     
-                    # 🟢 تحقق الإشارة: T1 = 2 و T2 = 9
-                    contract_type_to_use = get_signal_2_tick_analysis(current_data['tick_history'])
+                    # 🟢 تحقق الإشارة: T1 (0|1) و T2 (0|1) و T3 (7|8)
+                    contract_type_to_use = get_signal_3_tick_analysis(current_data['tick_history'])
                     
                     if contract_type_to_use == "DIGITOVER":
                         # 🚀 تحقق الشرط، ننفذ مباشرة
                         
                         if current_data['pending_martingale']:
-                            print("⚠️ [MARTINGALE] Condition met (T1=2 & T2=9). Executing Martingale trade.")
+                            print("⚠️ [MARTINGALE] Condition met (T1(0|1) & T2(0|1) & T3(7|8)). Executing Martingale trade.")
                         else:
                             current_data['current_stake'] = current_data['base_stake']
                             current_data['current_trade_state']['type'] = contract_type_to_use
-                            print(f"⚠️ [BASE SIGNAL] Condition met (T1=2 & T2=9). Executing Base trade.")
+                            print(f"⚠️ [BASE SIGNAL] Condition met (T1(0|1) & T2(0|1) & T3(7|8)). Executing Base trade.")
                             
                         execute_trade(email, current_data)
                     else:
@@ -561,7 +571,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
 
 
 # ==========================================================
-# FLASK APP SETUP AND ROUTES (No changes needed)
+# FLASK APP SETUP AND ROUTES (CONTROL_FORM updated for 1-tick duration)
 # ==========================================================
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
@@ -684,8 +694,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set martingale_mode = 'Martingale (Max 2 Steps) Awaiting T1=2 & T2=9 Condition' %}
-    {% set strategy = 'DIGIT OVER 2 (' + DURATION|string + ' Ticks) | Analysis: SEQUENTIAL (2 Ticks) | Entry: (T1=2 & T2=9) | Market: ' + SYMBOL + ' | Martingale x' + martingale_multiplier|string + ' (Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string + ')' %}
+    {% set strategy = 'DIGIT OVER 2 (' + DURATION|string + ' Tick) | Analysis: SEQUENTIAL (3 Ticks) | Entry: (T1∈{0,1} & T2∈{0,1} & T3∈{7,8}) | Market: ' + SYMBOL + ' | Martingale x' + martingale_multiplier|string + ' (Max ' + max_consecutive_losses|string + ' Losses, Max Step ' + max_martingale_step|string + ')' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <div class="data-box">
@@ -838,6 +847,8 @@ def start_bot():
         return redirect(url_for('control_panel'))
         
     account_type = request.form.get('account_type', 'demo')
+    
+    # 🌟 التعديل هنا: استخدام "tUSDT" مباشرة للحساب الحقيقي
     currency_code = "USD" if account_type == 'demo' else "tUSDT" 
 
     proc = multiprocessing.Process(
