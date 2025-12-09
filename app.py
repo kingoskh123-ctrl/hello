@@ -838,7 +838,7 @@ def start_bot():
         return redirect(url_for('control_panel'))
         
     account_type = request.form.get('account_type', 'demo')
-    currency_code = "USD" if account_type == 'demo' else "UST" 
+    currency_code = "USD" if account_type == 'demo' else "tUSDT" 
 
     proc = multiprocessing.Process(
         target=bot_core_logic, 
