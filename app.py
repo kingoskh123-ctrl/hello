@@ -15,7 +15,7 @@ WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 # 🌟 الزوج R_25
 SYMBOL = "R_25"        
 # 🌟 مدة الصفقة 3 تيك
-DURATION = 3            
+DURATION = 1            
 DURATION_UNIT = "t"     
 # 🌟 خطوة مضاعفة واحدة
 MARTINGALE_STEPS = 1    
