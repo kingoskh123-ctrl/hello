@@ -9,21 +9,20 @@ from flask import Flask, request, render_template_string, redirect, url_for, ses
 from datetime import datetime, timezone
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (2 Ticks Analysis - Instant Martingale - DIFF)
+# BOT CONSTANT SETTINGS (3 Ticks Analysis - Delay Martingale - DIFF Barrier=T1)
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929" 
 SYMBOL = "R_100"        
-DURATION = 1            # مدة الصفقة: 1 تيك
+# 🌟 مدة الصفقة 3 تيك
+DURATION = 1            
 DURATION_UNIT = "t"     
-# 🌟 التعديل: خطوة مضاعفة واحدة
 MARTINGALE_STEPS = 1    
-# 🌟 التعديل: الحد الأقصى للخسائر المتتالية 
 MAX_CONSECUTIVE_LOSSES = 2 
 RECONNECT_DELAY = 1      
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
-TICK_HISTORY_SIZE = 2   
-# 🌟 التعديل: مضاعف Martingale هو 14.0
+# 🌟 التعديل: تحليل 3 تيكات
+TICK_HISTORY_SIZE = 3   
 MARTINGALE_MULTIPLIER = 14.0 
 CANDLE_TICK_SIZE = 0   
 SYNC_SECONDS = [] 
@@ -38,7 +37,8 @@ manager = multiprocessing.Manager()
 active_ws = {} 
 is_contract_open = manager.dict() 
 
-TRADE_STATE_DEFAULT = {"type": "DIGITDIFF", "target_digit": 8} 
+# 🌟 حالة افتراضية (DIFF 0)
+TRADE_STATE_DEFAULT = {"type": "DIGITDIFF", "target_digit": 0} 
 
 DEFAULT_SESSION_STATE = {
     "api_token": "",
@@ -66,6 +66,7 @@ DEFAULT_SESSION_STATE = {
     "pending_instant_trade": False, 
     "martingale_stake": 0.0,     
     "martingale_type": "DIGITDIFF", 
+    "martingale_target_digit": 0, # الحاجز في المضاعفة (سيكون T1 Digit)
 }
 # ... [Persistent state management functions - No change] ...
 
@@ -193,7 +194,6 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
 def calculate_martingale_stake(base_stake, current_step):
     if current_step == 0:
         return base_stake
-    # 🌟 استخدام المضاعف الجديد 14.0
     if current_step <= MARTINGALE_STEPS:
         return base_stake * (MARTINGALE_MULTIPLIER ** current_step) 
     else:
@@ -236,7 +236,8 @@ def send_trade_order(email, stake, contract_type, target_digit, currency_code, i
     current_data['current_trade_state']['type'] = contract_type
     current_data['current_trade_state']['target_digit'] = target_digit
     
-    current_data['pending_martingale'] = False
+    if is_martingale:
+         current_data['pending_martingale'] = False # إلغاء الانتظار بعد إرسال طلب المضاعفة
     
     save_session_data(email, current_data)
 
@@ -271,6 +272,7 @@ def check_pnl_limits(email, profit_loss, trade_type):
         current_data['pending_martingale'] = False 
         current_data['pending_instant_trade'] = False 
         current_data['pending_time_signal'] = None 
+        current_data['martingale_target_digit'] = 0 # إعادة ضبط حاجز المضاعفة
         
         if current_data['current_profit'] >= current_data['tp_target']:
             stop_triggered = "TP Reached"
@@ -283,35 +285,30 @@ def check_pnl_limits(email, profit_loss, trade_type):
         current_data['last_losing_trade_type'] = trade_type
         current_data['pending_time_signal'] = None 
         
-        # 🌟 بما أن MARTINGALE_STEPS = 1، يتم الدخول هنا فقط في الخطوة 1
-        if current_data['current_step'] <= MARTINGALE_STEPS: 
-            # 🚀 المضاعفة الفورية
+        if current_data['current_step'] <= MARTINGALE_STEPS:
+            # 🚀 تفعيل وضع انتظار المضاعفة (Delay Martingale)
             new_stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
             
-            # صفقة المضاعفة: DIGITDIFF 9
+            # 🌟 صفقة المضاعفة: نفس نوع الصفقة الأساسية ونفس الحاجز (T1 Digit)
             contract_type_to_use = "DIGITDIFF" 
-            target_digit_to_use = 9 
+            target_digit_to_use = current_data['current_trade_state']['target_digit'] # استخدام الحاجز الذي تم اختياره في الصفقة الخاسرة
             
             current_data['current_stake'] = new_stake
-            current_data['pending_martingale'] = False 
+            current_data['pending_martingale'] = True # تفعيل الانتظار لإشارة الدخول
             current_data['pending_instant_trade'] = False 
             current_data['martingale_stake'] = new_stake
             current_data['martingale_type'] = contract_type_to_use
+            current_data['martingale_target_digit'] = target_digit_to_use # حفظ الحاجز لاستخدامه لاحقاً
             
-            save_session_data(email, current_data) 
-            
-            # ⚡️ إرسال أمر الشراء الفوري للمضاعفة
-            send_trade_order(email, new_stake, contract_type_to_use, target_digit_to_use, current_data['currency'], is_martingale=True)
-            
-            print(f"🚨 [INSTANT MARTINGALE] Loss detected. Executing Step {current_data['current_step']} instantly ({contract_type_to_use} {target_digit_to_use}) @ {new_stake:.2f}.")
+            print(f"🚨 [DELAY MARTINGALE] Loss detected. Pending Step {current_data['current_step']} ({contract_type_to_use} {target_digit_to_use}) @ {new_stake:.2f}. Waiting for next signal...")
 
         else:
-            # تجاوز عدد خطوات المضاعفة (هذا يحدث في الخطوة 2 وما فوق)
+            # تجاوز عدد خطوات المضاعفة 
             current_data['current_stake'] = current_data['base_stake']
             current_data['pending_martingale'] = False
             current_data['pending_instant_trade'] = False 
+            current_data['martingale_target_digit'] = 0
         
-        # 🌟 فحص حد الخسائر المتتالية
         if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES: 
             stop_triggered = f"SL Reached ({MAX_CONSECUTIVE_LOSSES} Consecutive Losses)"
             
@@ -324,7 +321,7 @@ def check_pnl_limits(email, profit_loss, trade_type):
         is_contract_open[email] = False 
         return 
         
-    if current_data['current_step'] == 0:
+    if current_data['current_step'] == 0 or current_data['pending_martingale']:
         is_contract_open[email] = False 
     
 
@@ -335,12 +332,12 @@ def check_pnl_limits(email, profit_loss, trade_type):
     return current_data['pending_instant_trade'] 
 
 # ==========================================================
-# UTILITY FUNCTIONS FOR 2-TICK ANALYSIS (Unchanged Logic)
+# UTILITY FUNCTIONS FOR 3-TICK ANALYSIS (New Logic)
 # ==========================================================
 
 def get_target_digit(price):
     """
-    يستخرج الرقم الثاني بعد الفاصلة.
+    يستخرج الرقم الثاني بعد الفاصلة (الرقم الأخير).
     """
     try:
         price_str = str(price) 
@@ -348,6 +345,7 @@ def get_target_digit(price):
         if '.' in price_str:
             decimal_part = price_str.split('.')[-1]
             if len(decimal_part) >= 2:
+                # الرقم الثاني بعد الفاصلة هو الرقم الأخير
                 return int(decimal_part[1]) 
             elif len(decimal_part) == 1:
                 return 0 
@@ -357,34 +355,35 @@ def get_target_digit(price):
         print(f"❌ Error processing price for Digit Check: {e}")
         return None 
 
-def get_signal_2_tick_analysis(tick_history):
+def get_signal_3_tick_analysis(tick_history):
     """
-    يحدد الإشارة بناءً على تحليل 2 تيكات للدخول الأساسي:
-    T1 (الأقدم): = 9
-    T2 (الأحدث): = 9
+    يحدد الإشارة بناءً على تحليل 3 تيكات:
+    T1 (الأقدم): index -3
+    T2: index -2
+    T3 (الأحدث): index -1
+
+    شرط الدخول: T1 Digit = T3 Digit.
+    الحاجز: T1 Digit.
     """
     
     if len(tick_history) < TICK_HISTORY_SIZE: 
         return None, None 
     
-    # T1: الأقدم (index -2)
-    digit_t1 = get_target_digit(tick_history[-2]['price'])
+    # T1: الأقدم (index -3)
+    digit_t1 = get_target_digit(tick_history[-3]['price'])
     
-    # T2: الأحدث (index -1)
-    digit_t2 = get_target_digit(tick_history[-1]['price'])
+    # T3: الأحدث (index -1)
+    digit_t3 = get_target_digit(tick_history[-1]['price'])
     
-    # الشرط: T1 = 9 و T2 = 9
-    cond_t1_is_9 = (digit_t1 == 9)
-    cond_t2_is_9 = (digit_t2 == 9)
-    
-    if cond_t1_is_9 and cond_t2_is_9: 
-        # الدخول بصفقة DIGITDIFF 8
-        return "DIGITDIFF", 8 
+    # 🌟 الشرط الجديد: T1 Digit = T3 Digit
+    if digit_t1 == digit_t3: 
+        # الدخول بصفقة DIGITDIFF والحاجز هو T1 Digit
+        return "DIGITDIFF", digit_t1 
     else:
         return None, None
 
 # ==========================================================
-# CORE BOT LOGIC 
+# CORE BOT LOGIC (Updated Tick Message Handler)
 # ==========================================================
 
 def bot_core_logic(email, token, stake, tp, account_type, currency_code):
@@ -427,13 +426,15 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         "total_wins": session_data.get("total_wins", 0),
         "total_losses": session_data.get("total_losses", 0),
         "pending_time_signal": None, 
-        "pending_martingale": False, 
+        "pending_martingale": session_data.get("pending_martingale", False), 
         "pending_instant_trade": False, 
         "martingale_stake": session_data.get("martingale_stake", 0.0), 
         "martingale_type": "DIGITDIFF", 
+        "martingale_target_digit": session_data.get("martingale_target_digit", 0),
     })
     
-    if session_data['current_step'] > 0:
+    if session_data['current_step'] > 0 and not session_data['pending_martingale']: 
+        session_data['pending_martingale'] = True 
         session_data['current_stake'] = calculate_martingale_stake(session_data['base_stake'], session_data['current_step'])
         session_data['martingale_stake'] = session_data['current_stake']
     
@@ -470,16 +471,19 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
             print(f"✅ [PROCESS] Connection established for {email}.")
             
         
-        def execute_base_trade(email, current_data, contract_type, target_digit):
-            stake_to_use = current_data['base_stake']
+        def execute_trade(email, current_data, contract_type, target_digit, is_martingale=False):
+            if is_martingale:
+                stake_to_use = current_data['martingale_stake']
+                target_digit_to_use = current_data['martingale_target_digit'] # استخدم الحاجز المحفوظ للمضاعفة
+            else:
+                stake_to_use = current_data['base_stake']
+                target_digit_to_use = target_digit # استخدم الحاجز المحسوب من الإشارة
+            
             currency_code = current_data['currency']
             
-            current_data['current_trade_state']['type'] = contract_type
-            current_data['current_trade_state']['target_digit'] = target_digit
+            send_trade_order(email, stake_to_use, contract_type, target_digit_to_use, currency_code, is_martingale=is_martingale)
             
-            send_trade_order(email, stake_to_use, contract_type, target_digit, currency_code, is_martingale=False)
 
-        
         def on_message_wrapper(ws_app, message):
             data = json.loads(message)
             msg_type = data.get('msg_type')
@@ -500,14 +504,14 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                 }
                 current_data['last_tick_data'] = tick_data
                 
-                # تحديث سجل التيكات (نحتفظ بـ 2 تيك فقط)
+                # تحديث سجل التيكات (نحتفظ بـ 3 تيك فقط)
                 current_data['tick_history'].append(tick_data)
                 if len(current_data['tick_history']) > TICK_HISTORY_SIZE: 
                     current_data['tick_history'] = current_data['tick_history'][-TICK_HISTORY_SIZE:]
                     
                 
-                # منطق الدخول الأساسي (فقط في حال لم يكن هناك عقد مفتوح ولم نكن في خطوة مضاعفة)
-                if is_contract_open.get(email) is False and current_data['current_step'] == 0:
+                # منطق الدخول (سواء كان أساسي أو مضاعف)
+                if is_contract_open.get(email) is False and len(current_data['tick_history']) == TICK_HISTORY_SIZE:
                     
                     current_time_ms = time.time() * 1000
                     time_since_last_entry_ms = current_time_ms - current_data['last_entry_time']
@@ -517,15 +521,28 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                         save_session_data(email, current_data) 
                         return
                     
-                    # 🟢 التحقق من إشارة الدخول الأساسي (T1=9 & T2=9)
-                    contract_type, target_digit = get_signal_2_tick_analysis(current_data['tick_history'])
+                    # 🟢 التحقق من إشارة الدخول (T1 Digit = T3 Digit)
+                    contract_type, target_digit = get_signal_3_tick_analysis(current_data['tick_history'])
                     
-                    if contract_type == "DIGITDIFF" and target_digit == 8:
+                    if contract_type == "DIGITDIFF" and target_digit is not None:
                         
-                        # إشارة الدخول الأساسي تحققت
-                        print(f"⚠️ [BASE SIGNAL] Condition met (T1=9 & T2=9). Executing Base trade: DIGITDIFF 8.")
+                        # 1. إذا كنا في وضع انتظار المضاعفة (Pending Martingale)
+                        if current_data['pending_martingale']:
+                            # الدخول بالمضاعفة (DIGITDIFF Barrier=T1 Digit)
+                            
+                            # يجب أن يكون الحاجز في الإشارة الحالية مطابقاً للحاجز المحفوظ من الصفقة الخاسرة
+                            if target_digit == current_data['martingale_target_digit']:
+                                print(f"🚀 [MARTINGALE SIGNAL] Signal met. Executing Step {current_data['current_step']} (DIFF {target_digit}).")
+                                execute_trade(email, current_data, contract_type, target_digit, is_martingale=True)
+                            else:
+                                pass # تجاهل الإشارة إذا لم يكن الحاجز مطابقاً
+                            
+                        # 2. إذا كنا في وضع الصفقة الأساسية (Step 0)
+                        elif current_data['current_step'] == 0:
+                            # الدخول بالصفقة الأساسية (DIGITDIFF Barrier=T1 Digit)
+                            print(f"⚠️ [BASE SIGNAL] Condition met (T1={target_digit} & T3={target_digit}). Executing Base trade: DIGITDIFF {target_digit}.")
+                            execute_trade(email, current_data, contract_type, target_digit, is_martingale=False)
                         
-                        execute_base_trade(email, current_data, contract_type, target_digit)
                     else:
                         pass
                 
@@ -587,7 +604,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
 
 
 # ==========================================================
-# FLASK APP SETUP AND ROUTES (Updated Strategy Description)
+# FLASK APP SETUP AND ROUTES 
 # ==========================================================
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
@@ -711,7 +728,7 @@ CONTROL_FORM = """
 
 {% if session_data and session_data.is_running %}
     {# 🌟 تم تحديث وصف الاستراتيجية ليعكس الإعدادات الجديدة #}
-    {% set strategy = 'T1=9 & T2=9 | Base: DIFF 8 | Martingale: DIFF 9 | (' + DURATION|string + ' Tick) | Martingale: INSTANT (x' + martingale_multiplier|string + ', Max ' + max_martingale_step|string + ' Step)' %}
+    {% set strategy = '3-Tick Analysis: T1 Digit = T3 Digit | Barrier = T1 Digit | T=' + DURATION|string + 't | Martingale: DELAYED (x' + martingale_multiplier|string + ')' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     <div class="data-box">
@@ -726,10 +743,12 @@ CONTROL_FORM = """
         <p style="font-weight: bold; color: {% if session_data.current_step > 0 %}#ff5733{% else %}#555{% endif %};">
             Martingale Status: 
             <b>
-                {% if session_data.current_step > 0 %}
-                    STEP {{ session_data.current_step }} @ {{ session_data.current_stake|round(2) }} (EXECUTED INSTANTLY - DIFF 9)
+                {% if session_data.pending_martingale %}
+                    PENDING STEP {{ session_data.current_step }} @ {{ session_data.current_stake|round(2) }} (WAITING FOR SIGNAL DIFF {{ session_data.martingale_target_digit }})
+                {% elif session_data.current_step > 0 %}
+                    STEP {{ session_data.current_step }} @ {{ session_data.current_stake|round(2) }} (TRADE ACTIVE - DIFF {{ session_data.current_trade_state.target_digit }})
                 {% else %}
-                    BASE STAKE @ {{ session_data.base_stake|round(2) }} (Waiting for Signal - DIFF 8)
+                    BASE STAKE @ {{ session_data.base_stake|round(2) }} (Waiting for Signal)
                 {% endif %}
             </b>
         </p>
