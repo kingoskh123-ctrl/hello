@@ -792,117 +792,134 @@ CONTROL_FORM = """
 # FLASK ROUTES (No change needed)
 # ==========================================================
 
-@app.route('/')
-def index():
-    if 'email' not in session:
-        return redirect(url_for('login_route'))
-    
-    email = session['email']
-    session_data = get_session_data(email)
-    
-    return render_template_string(CONTROL_FORM, 
-        email=email, 
-        session_data=session_data,
-        SYMBOL=SYMBOL,
-        DURATION=DURATION,
-        martingale_multiplier=MARTINGALE_MULTIPLIER,
-        max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
-        max_martingale_step=MARTINGALE_STEPS
-    )
-
-@app.route('/login', methods=['GET', 'POST'])
+@app.route('/', methods=['GET', 'POST'])
 def login_route():
+    if 'email' in session:
+        return redirect(url_for('control_panel'))
+        
     if request.method == 'POST':
-        email = request.form.get('email', '').strip().lower()
+        email = request.form.get('email', '').lower()
         allowed_users = load_allowed_users()
         
         if email in allowed_users:
             session['email'] = email
-            flash('Login successful.', 'success')
-            return redirect(url_for('index'))
+            flash('Login successful!', 'success')
+            return redirect(url_for('control_panel'))
         else:
-            flash('Invalid email address.', 'error')
-            return render_template_string(LOGIN_FORM)
-    
+            flash('Invalid user or email address not authorized.', 'error')
+            return redirect(url_for('login_route'))
+
     return render_template_string(LOGIN_FORM)
 
-@app.route('/logout')
-def logout():
-    session.pop('email', None)
-    flash('You have been logged out.', 'info')
-    return redirect(url_for('login_route'))
+@app.route('/control')
+def control_panel():
+    if 'email' not in session:
+        return redirect(url_for('login_route'))
+        
+    email = session['email']
+    session_data = get_session_data(email)
+    
+    is_proc_running = email in flask_local_processes and flask_local_processes[email].is_alive()
+    
+    if session_data['is_running'] and not is_proc_running:
+        print(f"🔄 [RECOVERY] Process {email} found dead, resetting state to stopped.")
+        session_data['is_running'] = False
+        session_data['stop_reason'] = "Process Crashed or Terminated"
+        save_session_data(email, session_data)
+
+    context = {
+        'email': email,
+        'session_data': session_data,
+        'SYMBOL': SYMBOL,
+        'DURATION': DURATION,
+        'martingale_multiplier': MARTINGALE_MULTIPLIER,
+        'max_consecutive_losses': MAX_CONSECUTIVE_LOSSES,
+        'max_martingale_step': MARTINGALE_STEPS,
+    }
+    
+    return render_template_string(CONTROL_FORM, **context)
 
 @app.route('/start', methods=['POST'])
 def start_bot():
     if 'email' not in session:
-        flash('Please log in first.', 'error')
         return redirect(url_for('login_route'))
-        
+    
     email = session['email']
     
-    if flask_local_processes.get(email) and flask_local_processes[email].is_alive():
-        flash('Bot is already running for this user.', 'info')
-        return redirect(url_for('index'))
-
+    stop_bot(email, clear_data=False, stop_reason="Restarting...") 
+    
+    token = request.form.get('token').strip()
     try:
-        token = request.form['token'].strip()
-        base_stake = float(request.form['stake'])
-        tp_target = float(request.form['tp'])
-        account_type = request.form['account_type']
+        stake = float(request.form.get('stake'))
+        tp = float(request.form.get('tp'))
+    except (TypeError, ValueError):
+        flash('Invalid Stake or TP value.', 'error')
+        return redirect(url_for('control_panel'))
         
-        currency_code = "USD"
-        if account_type == "live":
-            currency_code = "TUSDT"
+    account_type = request.form.get('account_type', 'demo')
+    
+    # 🌟 التعديل هنا: استخدام "tUSDT" مباشرة للحساب الحقيقي
+    currency_code = "USD" if account_type == 'demo' else "tUSDT" 
 
-        process = multiprocessing.Process(
-            target=bot_core_logic, 
-            args=(email, token, base_stake, tp_target, account_type, currency_code)
-        )
-        process.daemon = True
-        process.start()
-        
-        flask_local_processes[email] = process
-        
-        flash('🚀 Bot started successfully!', 'success')
-    except Exception as e:
-        flash(f'❌ Failed to start bot: {e}', 'error')
-        print(f"Flask Start Error: {e}")
-        
-    return redirect(url_for('index'))
+    proc = multiprocessing.Process(
+        target=bot_core_logic, 
+        args=(email, token, stake, tp, account_type, currency_code)
+    )
+    proc.start()
+    
+    flask_local_processes[email] = proc
+    
+    data = get_session_data(email)
+    data.update({
+        "is_running": True, 
+        "api_token": token,
+        "base_stake": stake, 
+        "tp_target": tp,
+        "account_type": account_type,
+        "currency": currency_code,
+        "current_stake": stake,
+        "stop_reason": "Running"
+    })
+    data["current_profit"] = 0.0
+    data["consecutive_losses"] = 0
+    data["current_step"] = 0
+    data["total_wins"] = 0
+    data["total_losses"] = 0
+    data["pending_martingale"] = False
+    
+    save_session_data(email, data)
+
+    flash('Bot started successfully!', 'success')
+    return redirect(url_for('control_panel'))
 
 @app.route('/stop', methods=['POST'])
 def stop_route():
     if 'email' not in session:
-        flash('Please log in first.', 'error')
         return redirect(url_for('login_route'))
         
     email = session['email']
-    force_stop = request.form.get('force_stop') == 'true'
+    force_stop = 'force_stop' in request.form
     
-    if email in flask_local_processes or force_stop:
-        stop_bot(email, clear_data=force_stop, stop_reason="Stopped Manually")
-        flash('🛑 Bot stopped successfully and session cleared.', 'success')
+    stop_bot(email, clear_data=force_stop, stop_reason="Stopped Manually")
+    
+    if force_stop:
+        flash('Bot forcefully stopped and session data cleared!', 'info')
     else:
-        current_data = get_session_data(email)
-        if current_data.get('is_running') == False and force_stop:
-            delete_session_data(email)
-            flash('🧹 Session data cleared successfully.', 'success')
-        elif current_data.get('is_running') == False and not force_stop:
-            flash('Bot is already stopped.', 'info')
-        else:
-            flash('Could not find running process.', 'error')
+        flash('Bot stopped successfully.', 'info')
         
-    return redirect(url_for('index'))
+    return redirect(url_for('control_panel'))
+
+@app.route('/logout')
+def logout():
+    if 'email' in session:
+        email = session['email']
+        stop_bot(email, clear_data=False, stop_reason="Logged Out") 
+        session.pop('email', None)
+        flash('You have been logged out.', 'info')
+        
+    return redirect(url_for('login_route'))
 
 if __name__ == '__main__':
-    if not os.path.exists(ACTIVE_SESSIONS_FILE):
-        with open(ACTIVE_SESSIONS_FILE, 'w') as f:
-            f.write("{}")
-
-    all_sessions = load_persistent_sessions()
-    for email in all_sessions:
-        if all_sessions[email].get('is_running'):
-            stop_bot(email, clear_data=False, stop_reason="Stopped due to Server Restart")
-            
-    print("Web server starting...")
-    app.run(host='0.0.0.0', port=5000)
+    load_allowed_users() 
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
