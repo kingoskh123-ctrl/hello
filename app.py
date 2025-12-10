@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929" 
 # 🌟 الزوج R_25
-SYMBOL = "R_25"        
+SYMBOL = "R_100"        
 # 🌟 مدة الصفقة 3 تيك
 DURATION = 1            
 DURATION_UNIT = "t"     
