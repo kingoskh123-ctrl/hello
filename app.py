@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929" 
 # 🌟 الزوج R_25
-SYMBOL = "R_100"        
+SYMBOL = "R_25"        
 # 🌟 مدة الصفقة 3 تيك
 DURATION = 1            
 DURATION_UNIT = "t"     
@@ -32,7 +32,7 @@ CANDLE_TICK_SIZE = 0
 SYNC_SECONDS = [] 
 # 🌟 نوع الصفقة ورقم الاختلاف
 CONTRACT_TYPE = "DIGITDIFF" # نوع الصفقة الثابت
-TARGET_DIGIT = 6            # الرقم المستهدف لـ DIGITDIFF (الرقم 0)
+TARGET_DIGIT = 8            # الرقم المستهدف لـ DIGITDIFF (الرقم 0)
 # 🌟 شرط الدخول
 ENTRY_DIGIT = 7             # الرقم الأخير للتيك الذي يجب أن يتحقق
 
