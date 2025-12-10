@@ -13,9 +13,9 @@ from datetime import datetime, timezone
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929" 
 # 🌟 الزوج R_25
-SYMBOL = "R_25"        
+SYMBOL = "R_100"        
 # 🌟 مدة الصفقة 3 تيك
-DURATION = 1            
+DURATION = 4            
 DURATION_UNIT = "t"     
 # 🌟 خطوة مضاعفة واحدة
 MARTINGALE_STEPS = 1    
@@ -32,9 +32,9 @@ CANDLE_TICK_SIZE = 0
 SYNC_SECONDS = [] 
 # 🌟 نوع الصفقة ورقم الاختلاف
 CONTRACT_TYPE = "DIGITDIFF" # نوع الصفقة الثابت
-TARGET_DIGIT = 8            # الرقم المستهدف لـ DIGITDIFF (الرقم 0)
+TARGET_DIGIT = 0            # الرقم المستهدف لـ DIGITDIFF (الرقم 0)
 # 🌟 شرط الدخول
-ENTRY_DIGIT = 7             # الرقم الأخير للتيك الذي يجب أن يتحقق
+ENTRY_DIGIT = 9             # الرقم الأخير للتيك الذي يجب أن يتحقق
 
 # ==========================================================
 # BOT RUNTIME STATE 
