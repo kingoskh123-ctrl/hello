@@ -32,7 +32,7 @@ CANDLE_TICK_SIZE = 0
 SYNC_SECONDS = [] 
 # 🌟 نوع الصفقة ورقم الاختلاف
 CONTRACT_TYPE = "DIGITDIFF" # نوع الصفقة الثابت
-TARGET_DIGIT = 0            # الرقم المستهدف لـ DIGITDIFF
+TARGET_DIGIT = 0            # الرقم المستهدف لـ DIGITDIFF (الرقم 0)
 # 🌟 شرط الدخول
 ENTRY_DIGIT = 7             # الرقم الأخير للتيك الذي يجب أن يتحقق
 
@@ -78,10 +78,9 @@ DEFAULT_SESSION_STATE = {
     "display_t2_price": 0.0, 
     "last_entry_digit": None, 
 }
-# ... [Persistent state management functions - No change] ...
 
 # ==========================================================
-# PERSISTENT STATE MANAGEMENT FUNCTIONS (No change needed)
+# PERSISTENT STATE MANAGEMENT FUNCTIONS
 # ==========================================================
 def get_file_lock(f):
     try:
@@ -757,13 +756,13 @@ CONTROL_FORM = """
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     
-    {# 🌟 Display T1 Price and Digit - التعديل هنا: استخدام تنسيق 0.3f لضمان 3 أرقام عشرية #}
+    {# 🌟 Display T1 Price and Digit - تم تصحيح خطأ 'split' هنا #}
     <div class="tick-box">
         <span>T1 Price (Current): <b>{% if session_data.display_t1_price %}{{ "%0.3f"|format(session_data.display_t1_price) }}{% else %}N/A{% endif %}</b></span>
         <span>Last Digit: <b class="current-digit">
-            {% set price_str = session_data.display_t1_price|string|split('.') %}
-            {% if price_str|length > 1 and price_str[-1]|length > 0 %}
-                {{ price_str[-1][-1] }}
+            {% set price_parts = session_data.display_t1_price|string.split('.') %} {# **التعديل الصحيح** #}
+            {% if price_parts|length > 1 and price_parts[-1]|length > 0 %}
+                {{ price_parts[-1][-1] }}
             {% else %}
                 0
             {% endif %}
@@ -858,7 +857,7 @@ CONTROL_FORM = """
 """
 
 # ==========================================================
-# FLASK ROUTES (No change needed)
+# FLASK ROUTES 
 # ==========================================================
 
 @app.route('/', methods=['GET', 'POST'])
