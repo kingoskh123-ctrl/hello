@@ -9,7 +9,7 @@ from flask import Flask, request, render_template_string, redirect, url_for, ses
 from datetime import datetime, timezone
 
 # ==========================================================
-# BOT CONSTANT SETTINGS (لا تغيير)
+# BOT CONSTANT SETTINGS 
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929" 
 SYMBOL = "R_100"        
@@ -20,7 +20,7 @@ MAX_CONSECUTIVE_LOSSES = 2
 RECONNECT_DELAY = 1      
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json" 
-TICK_HISTORY_SIZE = 4   
+TICK_HISTORY_SIZE = 3   
 MARTINGALE_MULTIPLIER = 6.0 
 CANDLE_TICK_SIZE = 0   
 SYNC_SECONDS = [] 
@@ -30,7 +30,7 @@ TRADE_CONFIGS = [
 ]
 
 # ==========================================================
-# BOT RUNTIME STATE (لا تغيير)
+# BOT RUNTIME STATE 
 # ==========================================================
 flask_local_processes = {}
 manager = multiprocessing.Manager() 
@@ -70,12 +70,12 @@ DEFAULT_SESSION_STATE = {
     "current_total_stake": 0.0, 
     "current_balance": 0.0,
     "is_balance_received": False,  
-    "pending_delayed_entry": False, 
-    "entry_t1_d2": None, 
+    "pending_delayed_entry": False, # لم يعد يستخدم في منطق الدخول
+    "entry_t1_d2": None, # لم يعد يستخدم في منطق الدخول
     "before_trade_balance": 0.0, 
 }
 
-# (.... Persistent State Management Functions - لا تغيير ....)
+# (.... Persistent State Management Functions ....)
 
 def get_file_lock(f):
     """ يطبق قفل كتابة حصري على الملف """
@@ -180,7 +180,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     global final_check_processes
 
     current_data = get_session_data(email)
-    current_data["is_running"] = False
+    current_data["is_running"] = False 
     current_data["stop_reason"] = stop_reason 
     
     if not clear_data: 
@@ -226,9 +226,10 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
         is_contract_open[email] = False 
 
     if clear_data:
-        delete_session_data(email) 
+        delete_session_data(email) # 🧹 مسح ملف الجلسة
         print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}) and session data cleared from file.")
         
+        # لضمان بقاء سبب التوقف الأخير للعرض
         temp_data = DEFAULT_SESSION_STATE.copy()
         temp_data["stop_reason"] = stop_reason
         save_session_data(email, temp_data) 
@@ -259,7 +260,7 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
     يرسل أوامر شراء متعددة (صفقتين) في نفس اللحظة.
     """
     global is_contract_open 
-    global final_check_processes # نحتاج هذه القائمة لبدء العملية الفرعية
+    global final_check_processes 
     
     if email not in active_ws or active_ws[email] is None: return
     ws_app = active_ws[email]
@@ -287,10 +288,12 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
     
     entry_msg = f"MARTINGALE STEP {current_data['current_step']}" if is_martingale else "BASE SIGNAL"
     
-    t1_d2_entry = current_data['entry_t1_d2'] if current_data['entry_t1_d2'] is not None else 'N/A'
-    t4_d2_entry = current_data['last_entry_d2']
+    # في الدخول الفوري، T1 D2 يتم حسابه من التيك الأول في history و T3 D2 هو التيك الأخير
+    tick_T1_price = current_data['tick_history'][0]['price'] if len(current_data['tick_history']) == 3 else 0.0
+    t1_d2_entry = get_target_digits(tick_T1_price)[1] if len(get_target_digits(tick_T1_price)) > 1 else 'N/A'
+    t3_d2_entry = current_data['last_entry_d2'] 
     
-    print(f"\n💰 [TRADE START] T1 D2: {t1_d2_entry} | T4 D2: {t4_d2_entry} | Total Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Balance Ref: {current_data['before_trade_balance']:.2f} {currency_code}")
+    print(f"\n💰 [TRADE START] T1 D2: {t1_d2_entry} | T3 D2: {t3_d2_entry} | Total Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Balance Ref: {current_data['before_trade_balance']:.2f} {currency_code}")
 
 
     for config in trade_configs:
@@ -398,14 +401,10 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
             current_data['current_total_stake'] = new_stake * len(TRADE_CONFIGS)
             current_data['martingale_config'] = TRADE_CONFIGS 
             
-            # 💡 يتم تصفيرها هنا لضمان بدء البحث عن الإشارة الأولية مجدداً
-            current_data['pending_delayed_entry'] = False 
-            current_data['entry_t1_d2'] = None
-            current_data['tick_history'] = [] 
-            
-            print(f"🚨 [MARTINGALE DELAYED] Overall Loss Detected. Pending Step {current_data['current_step']} @ Stake per contract: {new_stake:.2f} (Total: {current_data['current_total_stake']:.2f}). Waiting for T1 D2=9 & T4 D2=4/5 signal...")
+            print(f"🚨 [MARTINGALE PENDING] Overall Loss Detected. Pending Step {current_data['current_step']} @ Stake per contract: {new_stake:.2f} (Total: {current_data['current_total_stake']:.2f}). Waiting for Immediate Signal (T1 D2=4/5 & T3 D2=4/5)...")
 
         else:
+            # إعادة التعيين إذا تجاوزنا عدد خطوات المضاعفة
             current_data['current_stake'] = current_data['base_stake']
             current_data['pending_martingale'] = False
             current_data['current_total_stake'] = current_data['base_stake'] * len(TRADE_CONFIGS)
@@ -417,25 +416,24 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
             stop_triggered = f"SL Reached ({MAX_CONSECUTIVE_LOSSES} Consecutive Losses)"
             
     
-    # 🚨 التعديل الحاسم هنا: ضمان العودة إلى حالة البحث عن الإشارة الأولية بعد كل صفقة
+    # 🚨 ضمان العودة إلى حالة البحث عن الإشارة الأولية بعد كل صفقة
     current_data['pending_delayed_entry'] = False 
     current_data['entry_t1_d2'] = None
     
-    # مسح سجل التيكس لبدء جمع الإشارة الأولية (4 تيكات) من جديد
+    # مسح سجل التيكس لبدء جمع الإشارة الأولية (3 تيكات) من جديد
     current_data['tick_history'] = [] 
         
     save_session_data(email, current_data) 
     
     print(f"[LOG {email}] PNL: {current_data['current_profit']:.2f}, Last Total PL: {total_profit_loss:.2f}, Step: {current_data['current_step']}, Last Total Stake: {last_total_stake:.2f}")
 
+    # 🚨 ضمان إيقاف البوت عند تفعيل الإيقاف (SL أو TP)
     if stop_triggered:
         stop_bot(email, clear_data=True, stop_reason=stop_triggered) 
-        return 
-        
-    # ملاحظة: is_contract_open يتم تعيينه إلى False في عملية التحقق النهائية (final_check_process)
+        return # يجب أن نخرج فوراً بعد الإيقاف
 
 # ==========================================================
-# UTILITY FUNCTIONS FOR PRICE MOVEMENT ANALYSIS (لا تغيير)
+# UTILITY FUNCTIONS FOR PRICE MOVEMENT ANALYSIS 
 # ==========================================================
 
 def get_target_digits(price):
@@ -460,41 +458,38 @@ def get_target_digits(price):
 
 def get_initial_signal_check(tick_history):
     """
-    يتحقق من الإشارة الأولية بناءً على تحليل T1 (أقدم) و T4 (الأحدث).
-    الشروط: T1 D2 = 9 و T4 D2 = 4 أو 5.
+    يتحقق من الإشارة الأولية بناءً على تحليل T1 (أقدم) و T3 (الأحدث).
+    الشروط: T1 D2 = 4 أو 5 و T3 D2 = 4 أو 5.
     """
-    if len(tick_history) != 4:
+    # 🚨 التحقق من الحجم (3 تيكات)
+    if len(tick_history) != 3:
         return False
     
-    tick_T1_price = tick_history[0]['price'] 
-    tick_T4_price = tick_history[3]['price'] 
+    tick_T1_price = tick_history[0]['price'] # التيك الأقدم
+    tick_T3_price = tick_history[2]['price'] # التيك الأحدث
     
     digits_T1 = get_target_digits(tick_T1_price)
-    digits_T4 = get_target_digits(tick_T4_price)
+    digits_T3 = get_target_digits(tick_T3_price)
     
-    if len(digits_T1) < 2 or len(digits_T4) < 2:
+    if len(digits_T1) < 2 or len(digits_T3) < 2:
         return False
         
     digit_T1_D2 = digits_T1[1] 
-    digit_T4_D2 = digits_T4[1] 
+    digit_T3_D2 = digits_T3[1] 
     
-    condition_T1_is_9 = (digit_T1_D2 == 9)
-    condition_T4_is_4_or_5 = (digit_T4_D2 == 4 or digit_T4_D2 == 5)
+    # 🚨 الشروط الجديدة
+    condition_T1_is_4_or_5 = (digit_T1_D2 == 4 or digit_T1_D2 == 5)
+    condition_T3_is_4_or_5 = (digit_T3_D2 == 4 or digit_T3_D2 == 5)
     
-    if condition_T1_is_9 and condition_T4_is_4_or_5:
-        return digit_T1_D2 
+    if condition_T1_is_4_or_5 and condition_T3_is_4_or_5:
+        return digit_T1_D2 # نعيد قيمة T1 D2 لأغراض التتبع فقط
     else:
         return False
-
-# ==========================================================
-# NEW SYNC BALANCE RETRIEVAL FUNCTIONS 
-# ==========================================================
+        
+# ... (باقي دوال SYNC BALANCE RETRIEVAL) ...
 
 def get_initial_balance_sync(token):
-    """
-    يتصل مرة واحدة بشكل متزامن لسحب الرصيد الأولي مع الاشتراك في التحديثات.
-    (يتم استخدامه في البداية)
-    """
+    # ... (الكود كما هو) ...
     global WSS_URL_UNIFIED
     try:
         ws = websocket.WebSocket()
@@ -526,10 +521,7 @@ def get_initial_balance_sync(token):
         return None, f"Connection/Request Failed: {e}"
 
 def get_balance_sync(token):
-    """
-    يتصل مرة واحدة بشكل متزامن لسحب الرصيد الحالي (بدون اشتراك).
-    (يتم استخدامه بعد 8 ثواني من الصفقة)
-    """
+    # ... (الكود كما هو) ...
     global WSS_URL_UNIFIED
     try:
         # إنشاء اتصال جديد
@@ -565,9 +557,7 @@ def get_balance_sync(token):
 # ==========================================================
 
 def final_check_process(email, token, start_time_ms):
-    """
-    عملية منفصلة للانتظار والتحقق من الرصيد النهائي بعد 8 ثواني.
-    """
+    # ... (الكود كما هو) ...
     global is_contract_open
     global final_check_processes
     
@@ -614,6 +604,7 @@ def final_check_process(email, token, start_time_ms):
 
 def bot_core_logic(email, token, stake, tp, account_type, currency_code):
     """ Main bot logic for a single user/session. """
+    # ... (الكود كما هو) ...
     global active_ws 
     global is_contract_open 
     global WSS_URL_UNIFIED
@@ -740,10 +731,11 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                     # 1. تحديث تاريخ التيك (يجب أن يحدث دائماً)
                     current_data['tick_history'].append(tick_data)
                     
-                    # تحديث لعرض البيانات
+                    # 🚨 تحديث لعرض البيانات (3 تيكات)
                     if len(current_data['tick_history']) >= TICK_HISTORY_SIZE:
                         current_data['display_t1_price'] = current_data['tick_history'][0]['price'] 
-                        current_data['display_t4_price'] = current_data['tick_history'][-1]['price'] 
+                        # نستخدم التيك الأحدث (index 2)
+                        current_data['display_t4_price'] = current_data['tick_history'][2]['price'] 
                     else:
                         current_data['display_t1_price'] = 0.0 
                         current_data['display_t4_price'] = current_price 
@@ -760,51 +752,34 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                             save_session_data(email, current_data) 
                             return
                         
-                        # استخراج الرقم العشري الثاني للتيك الأخير
+                        # استخراج الرقم العشري الثاني للتيك الأخير (D2)
                         tick_T_latest_price = current_data['tick_history'][-1]['price'] 
                         digits_T_latest = get_target_digits(tick_T_latest_price)
                         digit_T_latest_D2 = digits_T_latest[1] if len(digits_T_latest) >= 2 else 'N/A'
                         
                         
-                        if current_data['pending_delayed_entry']:
+                        # 🚨 [منطق الدخول الفوري] 
+                        if len(current_data['tick_history']) >= TICK_HISTORY_SIZE:
                             
-                            # **المرحلة الثانية: انتظار D2=9 للدخول**
+                            # **المرحلة: البحث عن الإشارة الأولية والدخول الفوري**
                             
-                            is_entry_condition_met = (digit_T_latest_D2 == 9)
-                            
-                            if is_entry_condition_met:
-                                print(f"🚀 [DELAYED ENTRY MET] T D2=9 met. Executing trade (Step: {current_data['current_step']}).")
-                                
-                                is_martingale = current_data['current_step'] > 0
-                                execute_multi_trade(email, current_data, is_martingale=is_martingale)
-                                
-                                # تصفير حالة الانتظار المؤجل والسجل بعد الدخول
-                                # ملاحظة: يتم تصفيرها مرة أخرى في check_pnl_limits_by_balance لضمان العودة للشرط الأول
-                                current_data['pending_delayed_entry'] = False 
-                                current_data['entry_t1_d2'] = None
-                                current_data['tick_history'] = [] 
-                                
-                            else:
-                                # إذا لم يكن D2=9، لا نفعل شيئاً (ننتظر التيك التالي)
-                                pass 
-                                
-
-                        elif len(current_data['tick_history']) >= TICK_HISTORY_SIZE:
-                            
-                            # **المرحلة الأولى: البحث عن الإشارة الأولية (T1 D2=9 & T4 D2=4/5)**
-                            
-                            # التأكد من أن السجل هو 4 فقط لضمان التحليل الصحيح
+                            # التأكد من أن السجل هو 3 فقط
                             if len(current_data['tick_history']) > TICK_HISTORY_SIZE:
-                                # حذف أقدم تيك لتثبيت حجم السجل عند 4
+                                # حذف أقدم تيك لتثبيت حجم السجل عند 3
                                 current_data['tick_history'].pop(0) 
 
                             initial_t1_d2 = get_initial_signal_check(current_data['tick_history'])
                             
                             if initial_t1_d2 is not False:
-                                current_data['pending_delayed_entry'] = True
-                                current_data['entry_t1_d2'] = initial_t1_d2 
                                 
-                                print(f"🔔 INITIAL SIGNAL FOUND: T1 D2=9 & T4 D2={digit_T_latest_D2}. Starting rolling delay wait for T D2=9...")
+                                # 🚀 تنفيذ الصفقة فوراً
+                                is_martingale = current_data['current_step'] > 0
+                                execute_multi_trade(email, current_data, is_martingale=is_martingale)
+
+                                # تصفير سجل التيكس لبدء جمع الإشارة الجديدة
+                                current_data['tick_history'] = [] 
+                                
+                                print(f"🚀 [IMMEDIATE ENTRY] T1 D2: {initial_t1_d2} & T3 D2: {digit_T_latest_D2} Met. Executing trade (Step: {current_data['current_step']}).")
                                 
                             else:
                                 # إذا لم تتحقق الإشارة الأولية، نحذف أقدم تيك ونستمر
@@ -1004,11 +979,11 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = '4-Tick Rolling Delay: (T1 D2=9 & T4 D2=4/5) -> WAIT FOR T D2=9 | OVER 5 & UNDER 4 | Martingale: DELAYED (Steps=' + max_martingale_step|string + ', Multiplier=' + martingale_multiplier|string + ')' %}
+    {% set strategy = '3-Tick Immediate Entry: (T1 D2=4/5 & T3 D2=4/5) | OVER 5 & UNDER 4 | Martingale: IMMEDIATE (Steps=' + max_martingale_step|string + ', Multiplier=' + martingale_multiplier|string + ')' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     
-    {# 🌟 Display T1 D2 and T4 D2 #}
+    {# 🌟 Display T1 D2 and T3 D2 #}
     <div class="tick-box">
         <div>
             <span class="info-label">T1 Price:</span> <b>{% if session_data.display_t1_price %}{{ "%0.3f"|format(session_data.display_t1_price) }}{% else %}N/A{% endif %}</b>
@@ -1025,7 +1000,7 @@ CONTROL_FORM = """
             </b>
         </div>
         <div>
-            <span class="info-label">Current Price:</span> <b>{% if session_data.display_t4_price %}{{ "%0.3f"|format(session_data.display_t4_price) }}{% else %}N/A{% endif %}</b>
+            <span class="info-label">Current Price (T3):</span> <b>{% if session_data.display_t4_price %}{{ "%0.3f"|format(session_data.display_t4_price) }}{% else %}N/A{% endif %}</b>
             <br>
             <span class="info-label">Current D2:</span>
             <b class="current-digit">
@@ -1058,16 +1033,11 @@ CONTROL_FORM = """
             <b>{% if is_contract_open.get(email) %}Waiting 8s Check (Total Stake: {{ session_data.current_total_stake|round(2) }}){% else %}0 (Ready for Signal){% endif %}</b>
         </p>
         
-        <p style="font-weight: bold; color: {% if session_data.pending_delayed_entry %}#ff9900{% elif session_data.current_step > 0 %}#ff5733{% else %}#555{% endif %};">
-            Delay/Martingale Status: 
+        <p style="font-weight: bold; color: {% if session_data.current_step > 0 %}#ff5733{% else %}#555{% endif %};">
+            Martingale Status: 
             <b>
                 {% if is_contract_open.get(email) %}
                     Awaiting 8s Balance Check (Entry Time: {{ session_data.last_entry_time|int }})
-                {% elif session_data.pending_delayed_entry %}
-                    DELAYED ENTRY ACTIVE (T1 D2={{ session_data.entry_t1_d2 if session_data.entry_t1_d2 is not none else 'N/A' }}). Waiting for Current D2=9.
-                    {% if session_data.current_step > 0 %}
-                    (MARTINGALE STEP {{ session_data.current_step }})
-                    {% endif %}
                 {% elif session_data.current_step > 0 %}
                     MARTINGALE STEP {{ session_data.current_step }} @ Stake/Contract: {{ session_data.current_stake|round(2) }} (Total: {{ session_data.current_total_stake|round(2) }}) (Searching for Signal)
                 {% else %}
