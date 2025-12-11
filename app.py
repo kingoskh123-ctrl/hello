@@ -37,6 +37,7 @@ manager = multiprocessing.Manager()
 
 active_ws = {} 
 is_contract_open = manager.dict() 
+final_check_processes = manager.dict() # لتتبع عمليات التحقق النهائية
 
 TRADE_STATE_DEFAULT = TRADE_CONFIGS 
 
@@ -67,7 +68,7 @@ DEFAULT_SESSION_STATE = {
     "display_t4_price": 0.0, 
     "last_entry_d2": None, 
     "current_total_stake": 0.0, 
-    "current_balance": 0.0, 
+    "current_balance": 0.0,
     "is_balance_received": False,  
     "pending_delayed_entry": False, 
     "entry_t1_d2": None, 
@@ -176,6 +177,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
     """
     global is_contract_open 
     global flask_local_processes 
+    global final_check_processes
 
     current_data = get_session_data(email)
     current_data["is_running"] = False
@@ -195,6 +197,7 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
         except Exception as e:
             print(f"❌ [ERROR] Could not close WS for {email}: {e}")
             
+    # إنهاء عملية البوت الرئيسية
     if email in flask_local_processes:
         try:
             process = flask_local_processes[email]
@@ -202,9 +205,22 @@ def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
                 process.terminate() 
                 process.join(timeout=2) 
             del flask_local_processes[email] 
-            print(f"🛑 [INFO] Process for {email} forcefully terminated.")
+            print(f"🛑 [INFO] Main process for {email} forcefully terminated.")
         except Exception as e:
-            print(f"❌ [ERROR] Could not terminate process for {email}: {e}")
+            print(f"❌ [ERROR] Could not terminate main process for {email}: {e}")
+            
+    # إنهاء عملية التحقق النهائية إذا كانت قيد التشغيل
+    if email in final_check_processes:
+        try:
+            process = final_check_processes[email]
+            if process.is_alive():
+                process.terminate() 
+                process.join(timeout=2) 
+            del final_check_processes[email] 
+            print(f"🛑 [INFO] Final check process for {email} forcefully terminated.")
+        except Exception as e:
+            print(f"❌ [ERROR] Could not terminate final check process for {email}: {e}")
+
             
     if email in is_contract_open:
         is_contract_open[email] = False 
@@ -243,6 +259,8 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
     يرسل أوامر شراء متعددة (صفقتين) في نفس اللحظة.
     """
     global is_contract_open 
+    global final_check_processes # نحتاج هذه القائمة لبدء العملية الفرعية
+    
     if email not in active_ws or active_ws[email] is None: return
     ws_app = active_ws[email]
     
@@ -310,6 +328,15 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
          
     # حفظ الحالة بعد إرسال الأوامر وتحديد الرصيد المرجعي
     save_session_data(email, current_data) 
+    
+    # 🚨 **التعديل الجديد:** بدء عملية التحقق النهائي المنفصلة
+    final_check = multiprocessing.Process(
+        target=final_check_process, 
+        args=(email, current_data['api_token'], current_data['last_entry_time'])
+    )
+    final_check.start()
+    final_check_processes[email] = final_check
+    print(f"✅ [TRADE START] Final check process started in background.")
 
 
 def check_pnl_limits_by_balance(email, after_trade_balance): 
@@ -317,10 +344,12 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
     تتحقق من النتيجة عبر مقارنة الرصيد قبل وبعد الصفقة وتطبق منطق المضاعفة/التوقف.
     """
     global is_contract_open 
-
+    
     current_data = get_session_data(email)
-    if not current_data.get('is_running'): 
-        is_contract_open[email] = False
+    
+    # التأكد من عدم معالجة نتائج صفقة قديمة بعد إيقاف البوت
+    if not current_data.get('is_running') and current_data.get('stop_reason') != "Running": 
+        print(f"⚠️ [PNL] Bot stopped. Ignoring check for {email}.")
         return
         
     before_trade_balance = current_data.get('before_trade_balance', 0.0)
@@ -331,7 +360,7 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
         total_profit_loss = after_trade_balance - before_trade_balance 
         print(f"** [PNL Calc] After Balance: {after_trade_balance:.2f} - Before Balance: {before_trade_balance:.2f} = PL: {total_profit_loss:.2f}")
     else:
-        # حالة أمان إذا لم يتم تحديد الرصيد المرجعي (لا يجب أن تحدث الآن)
+        # حالة أمان إذا لم يتم تحديد الرصيد المرجعي
         print("⚠️ [PNL WARNING] Before trade balance is 0.0. Assuming loss equivalent to stake for safety.")
         total_profit_loss = -last_total_stake 
 
@@ -369,6 +398,7 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
             current_data['current_total_stake'] = new_stake * len(TRADE_CONFIGS)
             current_data['martingale_config'] = TRADE_CONFIGS 
             
+            # 💡 يتم تصفيرها هنا لضمان بدء البحث عن الإشارة الأولية مجدداً
             current_data['pending_delayed_entry'] = False 
             current_data['entry_t1_d2'] = None
             current_data['tick_history'] = [] 
@@ -386,6 +416,12 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
         if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES: 
             stop_triggered = f"SL Reached ({MAX_CONSECUTIVE_LOSSES} Consecutive Losses)"
             
+    
+    # 🚨 التعديل الحاسم هنا: ضمان العودة إلى حالة البحث عن الإشارة الأولية بعد كل صفقة
+    current_data['pending_delayed_entry'] = False 
+    current_data['entry_t1_d2'] = None
+    
+    # مسح سجل التيكس لبدء جمع الإشارة الأولية (4 تيكات) من جديد
     current_data['tick_history'] = [] 
         
     save_session_data(email, current_data) 
@@ -394,10 +430,9 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
 
     if stop_triggered:
         stop_bot(email, clear_data=True, stop_reason=stop_triggered) 
-        is_contract_open[email] = False 
         return 
         
-    is_contract_open[email] = False 
+    # ملاحظة: is_contract_open يتم تعيينه إلى False في عملية التحقق النهائية (final_check_process)
 
 # ==========================================================
 # UTILITY FUNCTIONS FOR PRICE MOVEMENT ANALYSIS (لا تغيير)
@@ -524,6 +559,54 @@ def get_balance_sync(token):
 
     except Exception as e:
         return None, f"Connection/Request Failed: {e}"
+        
+# ==========================================================
+# 🚨 الدالة الجديدة: عملية التحقق النهائي المنفصلة
+# ==========================================================
+
+def final_check_process(email, token, start_time_ms):
+    """
+    عملية منفصلة للانتظار والتحقق من الرصيد النهائي بعد 8 ثواني.
+    """
+    global is_contract_open
+    global final_check_processes
+    
+    time_to_wait = 8000 # 8 ثواني بالمللي ثانية
+    
+    # 1. الانتظار
+    time_since_start = (time.time() * 1000) - start_time_ms
+    sleep_time = max(0, (time_to_wait - time_since_start) / 1000)
+    
+    print(f"😴 [FINAL CHECK] Separate process sleeping for {sleep_time:.2f} seconds...")
+    time.sleep(sleep_time)
+    
+    # 2. جلب الرصيد بشكل متزامن
+    final_balance, error = get_balance_sync(token)
+    
+    if final_balance is not None:
+        # 3. تطبيق منطق PNL (نستخدم الدالة الموجودة)
+        check_pnl_limits_by_balance(email, final_balance)
+        
+        # 4. تحديث الرصيد وحالة is_contract_open
+        current_data = get_session_data(email)
+        current_data['current_balance'] = final_balance
+        save_session_data(email, current_data) 
+        
+        if email in is_contract_open:
+            is_contract_open[email] = False
+        
+        print(f"✅ [FINAL CHECK] Result confirmed. New Balance: {final_balance:.2f}. Process finished.")
+        
+    else:
+        print(f"❌ [FINAL CHECK] Failed to get final balance: {error}. Resetting contract status.")
+        # في حالة الفشل، نضمن إلغاء التعليق
+        if email in is_contract_open:
+            is_contract_open[email] = False
+    
+    # حذف العملية من قائمة التتبع بعد الانتهاء
+    if email in final_check_processes:
+        del final_check_processes[email]
+
 
 # ==========================================================
 # CORE BOT LOGIC 
@@ -544,7 +627,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
 
     session_data = get_session_data(email)
     
-    # 🌟 جلب الرصيد بشكل متزامن لمرة واحدة قبل البدء (مثل ما طلبته)
+    # 🌟 جلب الرصيد بشكل متزامن لمرة واحدة قبل البدء
     try:
         initial_balance, currency_returned = get_initial_balance_sync(token) 
         
@@ -556,7 +639,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
             
             # 💡 ضمان حفظ الرصيد الأولي كمرجع قبل الدخول في أي صفقة
             session_data['before_trade_balance'] = initial_balance 
-            save_session_data(email, session_data) # <--- 🚨 حفظ البيانات هنا لضمان التزامن
+            save_session_data(email, session_data) 
             
             print(f"💰 [SYNC BALANCE] Initial balance retrieved: {initial_balance:.2f} {session_data['currency']}. Account type: {session_data['account_type'].upper()}")
             
@@ -589,48 +672,6 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
         if not current_data.get('is_running'):
             break
 
-        # 💡 عملية التحقق من مؤقت الـ 8 ثواني بعد الصفقة
-        if is_contract_open.get(email) is True and current_data.get('last_entry_time') != 0:
-            current_time_ms = time.time() * 1000
-            time_since_entry_ms = current_time_ms - current_data['last_entry_time']
-            
-            if time_since_entry_ms > 8000: 
-                print("⏳ [8 SEC TIMER] Trade timeout reached. Checking final balance...")
-                
-                # 1. إغلاق الـ WebSocket للسماح بالاتصال المتزامن
-                if active_ws.get(email):
-                    try:
-                        print("    [WS CLOSE] Closing active WebSocket...")
-                        active_ws[email].close() 
-                        active_ws[email] = None 
-                    except Exception as ex:
-                        print(f"⚠️ [WS CLOSE] Error closing WS: {ex}")
-                    
-                time.sleep(1) # انتظار بسيط لضمان إغلاق الاتصال
-
-                current_data = get_session_data(email) 
-                token_to_use = current_data['api_token']
-                
-                # 2. جلب الرصيد النهائي بشكل متزامن (بنفس طريقة الجلب الأولي)
-                final_balance, error = get_balance_sync(token_to_use)
-                
-                if final_balance is not None:
-                    # 3. حساب PNL وتطبيق منطق المضاعفة/التوقف
-                    check_pnl_limits_by_balance(email, final_balance)
-                    
-                    # 4. تحديث الرصيد الحالي ليكون الرصيد النهائي للصفقة السابقة
-                    current_data = get_session_data(email) # إعادة الجلب بعد تحديث PNL
-                    current_data['current_balance'] = final_balance
-                    is_contract_open[email] = False
-                    save_session_data(email, current_data) # <--- حفظ الرصيد النهائي كأحدث رصيد
-                    
-                    print(f"✅ [BALANCE CHECK] Result confirmed. New Balance: {final_balance:.2f}.")
-                    
-                else:
-                    print(f"❌ [BALANCE CHECK] Failed to get final balance: {error}")
-                    
-                continue 
-        
         # 🌟 محاولة إعادة الاتصال بـ WebSocket إذا كان غير متصل
         if active_ws.get(email) is None:
             print(f"🔗 [PROCESS] Attempting to connect for {email} to {WSS_URL_UNIFIED}...")
@@ -675,10 +716,11 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                     current_balance = data['balance']['balance']
                     currency = data['balance']['currency']
                     
+                    # لا نعتمد على تحديث الرصيد لتحديد نتيجة الصفقة، ولكن نحفظه كأحدث رصيد
                     current_data['current_balance'] = float(current_balance)
                     current_data['currency'] = currency 
                     
-                    # 🚨 حفظ البيانات فوراً لضمان التزامن مع send_trade_orders
+                    # 🚨 حفظ البيانات فوراً لضمان التزامن 
                     save_session_data(email, current_data) 
                 
                 elif msg_type == 'tick':
@@ -695,8 +737,10 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                     }
                     current_data['last_tick_data'] = tick_data
                     
+                    # 1. تحديث تاريخ التيك (يجب أن يحدث دائماً)
                     current_data['tick_history'].append(tick_data)
                     
+                    # تحديث لعرض البيانات
                     if len(current_data['tick_history']) >= TICK_HISTORY_SIZE:
                         current_data['display_t1_price'] = current_data['tick_history'][0]['price'] 
                         current_data['display_t4_price'] = current_data['tick_history'][-1]['price'] 
@@ -711,44 +755,59 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                         is_time_gap_respected = time_since_last_entry_ms > 100 
                         
                         if not is_time_gap_respected:
-                            if len(current_data['tick_history']) > TICK_HISTORY_SIZE:
-                                current_data['tick_history'] = current_data['tick_history'][:-1]
+                            # إذا كان الوقت قصيراً جداً، نحذف التيك الأخير الذي أضفناه وننتظر
+                            current_data['tick_history'].pop() 
                             save_session_data(email, current_data) 
                             return
                         
-                        if len(current_data['tick_history']) >= TICK_HISTORY_SIZE:
+                        # استخراج الرقم العشري الثاني للتيك الأخير
+                        tick_T_latest_price = current_data['tick_history'][-1]['price'] 
+                        digits_T_latest = get_target_digits(tick_T_latest_price)
+                        digit_T_latest_D2 = digits_T_latest[1] if len(digits_T_latest) >= 2 else 'N/A'
+                        
+                        
+                        if current_data['pending_delayed_entry']:
                             
-                            tick_T_latest_price = current_data['tick_history'][-1]['price'] 
-                            digits_T_latest = get_target_digits(tick_T_latest_price)
-                            digit_T_latest_D2 = digits_T_latest[1] if len(digits_T_latest) >= 2 else 'N/A'
+                            # **المرحلة الثانية: انتظار D2=9 للدخول**
                             
-                            if current_data['pending_delayed_entry']:
+                            is_entry_condition_met = (digit_T_latest_D2 == 9)
+                            
+                            if is_entry_condition_met:
+                                print(f"🚀 [DELAYED ENTRY MET] T D2=9 met. Executing trade (Step: {current_data['current_step']}).")
                                 
-                                is_entry_condition_met = (digit_T_latest_D2 == 9)
+                                is_martingale = current_data['current_step'] > 0
+                                execute_multi_trade(email, current_data, is_martingale=is_martingale)
                                 
-                                if is_entry_condition_met:
-                                    print(f"🚀 [DELAYED ENTRY MET] T D2=9 met. Executing trade (Step: {current_data['current_step']}).")
-                                    
-                                    is_martingale = current_data['current_step'] > 0
-                                    execute_multi_trade(email, current_data, is_martingale=is_martingale)
-                                    
-                                    current_data['pending_delayed_entry'] = False 
-                                    current_data['entry_t1_d2'] = None
-                                    current_data['tick_history'] = [] 
-                                    
-                                else:
-                                    current_data['tick_history'].pop(0) 
+                                # تصفير حالة الانتظار المؤجل والسجل بعد الدخول
+                                # ملاحظة: يتم تصفيرها مرة أخرى في check_pnl_limits_by_balance لضمان العودة للشرط الأول
+                                current_data['pending_delayed_entry'] = False 
+                                current_data['entry_t1_d2'] = None
+                                current_data['tick_history'] = [] 
+                                
+                            else:
+                                # إذا لم يكن D2=9، لا نفعل شيئاً (ننتظر التيك التالي)
+                                pass 
+                                
 
-                            elif len(current_data['tick_history']) == TICK_HISTORY_SIZE:
+                        elif len(current_data['tick_history']) >= TICK_HISTORY_SIZE:
+                            
+                            # **المرحلة الأولى: البحث عن الإشارة الأولية (T1 D2=9 & T4 D2=4/5)**
+                            
+                            # التأكد من أن السجل هو 4 فقط لضمان التحليل الصحيح
+                            if len(current_data['tick_history']) > TICK_HISTORY_SIZE:
+                                # حذف أقدم تيك لتثبيت حجم السجل عند 4
+                                current_data['tick_history'].pop(0) 
+
+                            initial_t1_d2 = get_initial_signal_check(current_data['tick_history'])
+                            
+                            if initial_t1_d2 is not False:
+                                current_data['pending_delayed_entry'] = True
+                                current_data['entry_t1_d2'] = initial_t1_d2 
                                 
-                                initial_t1_d2 = get_initial_signal_check(current_data['tick_history'])
+                                print(f"🔔 INITIAL SIGNAL FOUND: T1 D2=9 & T4 D2={digit_T_latest_D2}. Starting rolling delay wait for T D2=9...")
                                 
-                                if initial_t1_d2 is not False:
-                                    current_data['pending_delayed_entry'] = True
-                                    current_data['entry_t1_d2'] = initial_t1_d2 
-                                    
-                                    print(f"🔔 INITIAL SIGNAL FOUND: T1 D2=9 & T4 D2={digit_T_latest_D2}. Starting rolling delay wait for T D2=9...")
-                                    
+                            else:
+                                # إذا لم تتحقق الإشارة الأولية، نحذف أقدم تيك ونستمر
                                 current_data['tick_history'].pop(0) 
                     
                     save_session_data(email, current_data) 
@@ -801,7 +860,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
 
 
 # ==========================================================
-# FLASK APP SETUP AND ROUTES (لا تغيير في الـ Flask)
+# FLASK APP SETUP AND ROUTES 
 # ==========================================================
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
@@ -1088,134 +1147,142 @@ CONTROL_FORM = """
 </script>
 """
 
-@app.route('/', methods=['GET', 'POST'])
-def login_route():
-    if 'email' in session:
-        return redirect(url_for('control_panel'))
-        
-    if request.method == 'POST':
-        email = request.form.get('email', '').lower()
-        allowed_users = load_allowed_users()
-        
-        if email in allowed_users:
-            session['email'] = email
-            flash('Login successful!', 'success')
-            return redirect(url_for('control_panel'))
-        else:
-            flash('Invalid user or email address not authorized.', 'error')
+@app.before_request
+def check_auth():
+    if request.path not in [url_for('login_route'), url_for('static', filename='style.css')]:
+        if 'email' not in session:
+            flash("Please log in to access the control panel.", 'info')
             return redirect(url_for('login_route'))
 
-    return render_template_string(LOGIN_FORM)
-
-@app.route('/control')
+@app.route('/', methods=['GET', 'POST'])
 def control_panel():
     if 'email' not in session:
         return redirect(url_for('login_route'))
-        
+
     email = session['email']
     session_data = get_session_data(email)
     
-    is_proc_running = email in flask_local_processes and flask_local_processes[email].is_alive()
-    
-    if session_data['is_running'] and not is_proc_running:
-        print(f"🔄 [RECOVERY] Process {email} found dead, resetting state to stopped.")
-        session_data['is_running'] = False
-        session_data['stop_reason'] = "Process Crashed or Terminated"
-        save_session_data(email, session_data)
+    # 🚨 تم التأكد من تمرير is_contract_open هنا
+    return render_template_string(CONTROL_FORM, 
+        email=email, 
+        session_data=session_data, 
+        SYMBOL=SYMBOL, 
+        DURATION=DURATION,
+        TICK_HISTORY_SIZE=TICK_HISTORY_SIZE,
+        max_martingale_step=MARTINGALE_STEPS,
+        martingale_multiplier=MARTINGALE_MULTIPLIER,
+        max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
+        is_contract_open=is_contract_open
+    )
 
-    context = {
-        'email': email,
-        'session_data': session_data,
-        'SYMBOL': SYMBOL,
-        'DURATION': DURATION,
-        'martingale_multiplier': MARTINGALE_MULTIPLIER,
-        'max_consecutive_losses': MAX_CONSECUTIVE_LOSSES,
-        'max_martingale_step': MARTINGALE_STEPS,
-    }
-    
-    return render_template_string(CONTROL_FORM, **context)
 
-@app.route('/start', methods=['POST'])
+@app.route('/login', methods=['GET', 'POST'])
+def login_route():
+    if request.method == 'POST':
+        email = request.form.get('email', '').strip().lower()
+        
+        ALLOWED_USERS = load_allowed_users()
+        
+        if email in ALLOWED_USERS:
+            session['email'] = email
+            flash(f"Login successful. Welcome, {email}!", 'success')
+            return redirect(url_for('control_panel'))
+        else:
+            flash("Invalid email or unauthorized user.", 'error')
+            return render_template_string(LOGIN_FORM)
+    
+    return render_template_string(LOGIN_FORM)
+
+@app.route('/logout', methods=['GET'])
+def logout():
+    email = session.pop('email', None)
+    if email:
+        pass
+    flash("You have been logged out.", 'info')
+    return redirect(url_for('login_route'))
+
+@app.route('/start_bot', methods=['POST'])
 def start_bot():
     if 'email' not in session:
+        flash("Login required.", 'error')
         return redirect(url_for('login_route'))
     
     email = session['email']
     
-    stop_bot(email, clear_data=False, stop_reason="Restarting...") 
-    
-    token = request.form.get('token').strip()
-    try:
-        stake = float(request.form.get('stake'))
-        tp = float(request.form.get('tp'))
-    except (TypeError, ValueError):
-        flash('Invalid Stake or TP value.', 'error')
+    if email in flask_local_processes and flask_local_processes[email].is_alive():
+        flash("Bot is already running!", 'info')
         return redirect(url_for('control_panel'))
+
+    try:
+        token = request.form['token'].strip()
+        stake = float(request.form['stake'])
+        tp = float(request.form['tp'])
+        account_type = request.form['account_type']
         
-    account_type = request.form.get('account_type', 'demo')
-    
-    # 🌟 التعديل هنا: استخدام "tUSDT" مباشرة للحساب الحقيقي
-    currency_code = "USD" if account_type == 'demo' else "tUSDT" 
+        if not token or stake <= 0.0 or tp <= 0.0:
+            raise ValueError("Invalid input values.")
+            
+        currency = "USD" if account_type == 'demo' else "tUSDT"
 
-    proc = multiprocessing.Process(
-        target=bot_core_logic, 
-        args=(email, token, stake, tp, account_type, currency_code)
-    )
-    proc.start()
-    
-    flask_local_processes[email] = proc
-    
-    data = get_session_data(email)
-    data.update({
-        "is_running": True, 
-        "api_token": token,
-        "base_stake": stake, 
-        "tp_target": tp,
-        "account_type": account_type,
-        "currency": currency_code,
-        "current_stake": stake,
-        "stop_reason": "Running"
-    })
-    data["current_profit"] = 0.0
-    data["consecutive_losses"] = 0
-    data["current_step"] = 0
-    data["total_wins"] = 0
-    data["total_losses"] = 0
-    data["pending_martingale"] = False
-    
-    save_session_data(email, data)
+        # Update and save initial session data before starting the process
+        initial_data = DEFAULT_SESSION_STATE.copy()
+        initial_data.update({
+            "api_token": token,
+            "base_stake": stake,
+            "tp_target": tp,
+            "account_type": account_type,
+            "currency": currency,
+            "current_stake": stake,
+            "current_total_stake": stake * len(TRADE_CONFIGS), 
+            "is_running": False, # Set to True inside the process once ready
+            "stop_reason": "Starting..." 
+        })
+        save_session_data(email, initial_data)
+        
+        # Start the bot process
+        process = multiprocessing.Process(
+            target=bot_core_logic, 
+            args=(email, token, stake, tp, account_type, currency)
+        )
+        process.start()
+        flask_local_processes[email] = process
 
-    flash('Bot started successfully!', 'success')
+        flash(f"Bot started successfully for {email} ({account_type.upper()}). Waiting for initial data...", 'success')
+    except Exception as e:
+        flash(f"Failed to start bot: {e}", 'error')
+        
     return redirect(url_for('control_panel'))
 
 @app.route('/stop', methods=['POST'])
 def stop_route():
     if 'email' not in session:
+        flash("Login required.", 'error')
         return redirect(url_for('login_route'))
         
     email = session['email']
-    force_stop = 'force_stop' in request.form
+    force_stop = request.form.get('force_stop') == 'true'
     
-    stop_bot(email, clear_data=force_stop, stop_reason="Stopped Manually")
+    # Determine if we should clear data based on force_stop or normal stop
+    clear_data_on_stop = force_stop 
     
-    if force_stop:
-        flash('Bot forcefully stopped and session data cleared!', 'info')
-    else:
-        flash('Bot stopped successfully.', 'info')
-        
+    stop_bot(email, clear_data=clear_data_on_stop, stop_reason="Stopped Manually")
+    
+    flash(f"Bot stopped and {'session cleared' if clear_data_on_stop else 'state saved'}.", 'info')
     return redirect(url_for('control_panel'))
 
-@app.route('/logout')
-def logout():
-    if 'email' in session:
-        email = session['email']
-        stop_bot(email, clear_data=False, stop_reason="Logged Out") 
-        session.pop('email', None)
-        flash('You have been logged out.', 'info')
-        
-    return redirect(url_for('login_route'))
-
 if __name__ == '__main__':
-    load_allowed_users() 
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    # Initial cleanup of old processes
+    for email in list(flask_local_processes.keys()):
+        if flask_local_processes[email].is_alive():
+            flask_local_processes[email].terminate()
+            flask_local_processes[email].join()
+            del flask_local_processes[email]
+
+    # Ensure files exist
+    if not os.path.exists(ACTIVE_SESSIONS_FILE):
+        with open(ACTIVE_SESSIONS_FILE, 'w') as f:
+            f.write('{}')
+    if not os.path.exists(USER_IDS_FILE):
+        load_allowed_users() # Creates the default file
+
+    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
