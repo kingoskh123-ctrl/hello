@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929" 
 SYMBOL = "R_100"        
-DURATION = 2            
+DURATION = 1            # 💡 [DURATION = 1] تم تغيير المدة لتصبح 1 تيك
 DURATION_UNIT = "t"     
 MARTINGALE_STEPS = 1    
 MAX_CONSECUTIVE_LOSSES = 2 
@@ -70,8 +70,8 @@ DEFAULT_SESSION_STATE = {
     "current_total_stake": 0.0, 
     "current_balance": 0.0,
     "is_balance_received": False,  
-    "pending_delayed_entry": False, # لم يعد يستخدم في منطق الدخول
-    "entry_t1_d2": None, # لم يعد يستخدم في منطق الدخول
+    "pending_delayed_entry": False,
+    "entry_t1_d2": None, 
     "before_trade_balance": 0.0, 
 }
 
@@ -333,13 +333,16 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
     save_session_data(email, current_data) 
     
     # 🚨 **التعديل الجديد:** بدء عملية التحقق النهائي المنفصلة
+    # بما أن المدة 1 تيك، فسننتظر 4 ثواني للتأكد من انتهاء الصفقة وتحديث الرصيد
+    check_time = 4000 # 4 ثواني
+    
     final_check = multiprocessing.Process(
         target=final_check_process, 
-        args=(email, current_data['api_token'], current_data['last_entry_time'])
+        args=(email, current_data['api_token'], current_data['last_entry_time'], check_time)
     )
     final_check.start()
     final_check_processes[email] = final_check
-    print(f"✅ [TRADE START] Final check process started in background.")
+    print(f"✅ [TRADE START] Final check process started in background (Waiting {check_time / 1000}s).")
 
 
 def check_pnl_limits_by_balance(email, after_trade_balance): 
@@ -347,6 +350,8 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
     تتحقق من النتيجة عبر مقارنة الرصيد قبل وبعد الصفقة وتطبق منطق المضاعفة/التوقف.
     """
     global is_contract_open 
+    global MARTINGALE_STEPS
+    global MAX_CONSECUTIVE_LOSSES
     
     current_data = get_session_data(email)
     
@@ -390,31 +395,35 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
         # 🔴 حالة الخسارة الإجمالية (MARTINGALE/STOP)
         current_data['total_losses'] += 1
         current_data['consecutive_losses'] += 1
-        current_data['current_step'] += 1
         
-        if current_data['current_step'] <= MARTINGALE_STEPS:
-            new_stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
-            
-            current_data['current_stake'] = new_stake
-            current_data['pending_martingale'] = True 
-            current_data['martingale_stake'] = new_stake
-            current_data['current_total_stake'] = new_stake * len(TRADE_CONFIGS)
-            current_data['martingale_config'] = TRADE_CONFIGS 
-            
-            print(f"🚨 [MARTINGALE PENDING] Overall Loss Detected. Pending Step {current_data['current_step']} @ Stake per contract: {new_stake:.2f} (Total: {current_data['current_total_stake']:.2f}). Waiting for Immediate Signal (T1 D2=4/5 & T3 D2=4/5)...")
-
-        else:
-            # إعادة التعيين إذا تجاوزنا عدد خطوات المضاعفة
-            current_data['current_stake'] = current_data['base_stake']
-            current_data['pending_martingale'] = False
-            current_data['current_total_stake'] = current_data['base_stake'] * len(TRADE_CONFIGS)
-            current_data['current_step'] = 0
-            current_data['consecutive_losses'] = 0
-
-        
+        # 🚨 [FIXED SL LOGIC] التحقق من شرط الإيقاف (SL) أولاً قبل أي تصفير
         if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES: 
             stop_triggered = f"SL Reached ({MAX_CONSECUTIVE_LOSSES} Consecutive Losses)"
-            
+        
+        # 💡 إذا لم يتم الإيقاف، نتقدم إلى الخطوة التالية (مضاعفة أو إعادة تعيين)
+        else:
+            # إذا كنا ما زلنا ضمن خطوات المضاعفة
+            if current_data['current_step'] < MARTINGALE_STEPS:
+                current_data['current_step'] += 1
+                new_stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
+                
+                current_data['current_stake'] = new_stake
+                current_data['pending_martingale'] = True 
+                current_data['martingale_stake'] = new_stake
+                current_data['current_total_stake'] = new_stake * len(TRADE_CONFIGS)
+                current_data['martingale_config'] = TRADE_CONFIGS 
+                
+                print(f"🚨 [MARTINGALE PENDING] Overall Loss Detected. Pending Step {current_data['current_step']} @ Stake per contract: {new_stake:.2f} (Total: {current_data['current_total_stake']:.2f}). Waiting for Immediate Signal (T1 D2=4/5 & T3 D2=4/5)...")
+
+            # إذا تجاوزنا خطوات المضاعفة ولم نصل إلى حد الإيقاف (للتأمين)
+            else:
+                # إعادة التعيين 
+                current_data['current_stake'] = current_data['base_stake']
+                current_data['pending_martingale'] = False
+                current_data['current_total_stake'] = current_data['base_stake'] * len(TRADE_CONFIGS)
+                current_data['current_step'] = 0
+                current_data['consecutive_losses'] = 0
+        
     
     # 🚨 ضمان العودة إلى حالة البحث عن الإشارة الأولية بعد كل صفقة
     current_data['pending_delayed_entry'] = False 
@@ -556,16 +565,14 @@ def get_balance_sync(token):
 # 🚨 الدالة الجديدة: عملية التحقق النهائي المنفصلة
 # ==========================================================
 
-def final_check_process(email, token, start_time_ms):
+def final_check_process(email, token, start_time_ms, time_to_wait_ms):
     # ... (الكود كما هو) ...
     global is_contract_open
     global final_check_processes
     
-    time_to_wait = 8000 # 8 ثواني بالمللي ثانية
-    
     # 1. الانتظار
     time_since_start = (time.time() * 1000) - start_time_ms
-    sleep_time = max(0, (time_to_wait - time_since_start) / 1000)
+    sleep_time = max(0, (time_to_wait_ms - time_since_start) / 1000)
     
     print(f"😴 [FINAL CHECK] Separate process sleeping for {sleep_time:.2f} seconds...")
     time.sleep(sleep_time)
@@ -744,6 +751,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code):
                         
                         current_time_ms = time.time() * 1000
                         time_since_last_entry_ms = current_time_ms - current_data['last_entry_time']
+                        # بما أن المدة 1 تيك، فزمن الانتظار بعد الدخول يجب أن يكون قصيراً جداً (>100ms)
                         is_time_gap_respected = time_since_last_entry_ms > 100 
                         
                         if not is_time_gap_respected:
@@ -979,7 +987,7 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = '3-Tick Immediate Entry: (T1 D2=4/5 & T3 D2=4/5) | OVER 5 & UNDER 4 | Martingale: IMMEDIATE (Steps=' + max_martingale_step|string + ', Multiplier=' + martingale_multiplier|string + ')' %}
+    {% set strategy = '3-Tick Immediate Entry: (T1 D2=4/5 & T3 D2=4/5) | DURATION: 1 TICK | Martingale: IMMEDIATE (Steps=' + max_martingale_step|string + ', Multiplier=' + martingale_multiplier|string + ')' %}
     
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
     
@@ -1016,7 +1024,7 @@ CONTROL_FORM = """
     </div>
     
     <div class="data-box">
-        <p>Asset: <b>{{ SYMBOL }}</b> | Account: <b>{{ session_data.account_type.upper() }}</b></p>
+        <p>Asset: <b>{{ SYMBOL }}</b> | Account: <b>{{ session_data.account_type.upper() }}</b> | Duration: <b>1 Tick</b></p>
         
         {# 💡 عرض الرصيد #}
         <p style="font-weight: bold; color: #17a2b8;">
@@ -1030,14 +1038,14 @@ CONTROL_FORM = """
         
         <p style="font-weight: bold; color: {% if session_data.current_total_stake %}#007bff{% else %}#555{% endif %};">
             Open Contract Status: 
-            <b>{% if is_contract_open.get(email) %}Waiting 8s Check (Total Stake: {{ session_data.current_total_stake|round(2) }}){% else %}0 (Ready for Signal){% endif %}</b>
+            <b>{% if is_contract_open.get(email) %}Waiting 4s Check (Total Stake: {{ session_data.current_total_stake|round(2) }}){% else %}0 (Ready for Signal){% endif %}</b>
         </p>
         
         <p style="font-weight: bold; color: {% if session_data.current_step > 0 %}#ff5733{% else %}#555{% endif %};">
             Martingale Status: 
             <b>
                 {% if is_contract_open.get(email) %}
-                    Awaiting 8s Balance Check (Entry Time: {{ session_data.last_entry_time|int }})
+                    Awaiting 4s Balance Check (Entry Time: {{ session_data.last_entry_time|int }})
                 {% elif session_data.current_step > 0 %}
                     MARTINGALE STEP {{ session_data.current_step }} @ Stake/Contract: {{ session_data.current_stake|round(2) }} (Total: {{ session_data.current_total_stake|round(2) }}) (Searching for Signal)
                 {% else %}
