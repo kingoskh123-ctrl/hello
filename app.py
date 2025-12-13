@@ -13,23 +13,22 @@ from datetime import datetime, timezone
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
-DURATION = 5            
+DURATION = 5          
 DURATION_UNIT = "t"
-MARTINGALE_STEPS = 0            
-MAX_CONSECUTIVE_LOSSES = 1      
+MARTINGALE_STEPS = 3          
+MAX_CONSECUTIVE_LOSSES = 4    
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 TICK_HISTORY_SIZE = 2   
-MARTINGALE_MULTIPLIER = 6.0
+MARTINGALE_MULTIPLIER = 3.0
 CANDLE_TICK_SIZE = 0
 SYNC_SECONDS = []
 
-# إعدادات الدخول: صفقة واحدة فقط (LOWER -0.6)
+# 🌟🌟🌟 الإعدادات الحالية: ONETOUCH وحاجز +0.1 🌟🌟🌟
 TRADE_CONFIGS = [
-    {"type": "PUT", "barrier": "+0.6", "label": "LOWER_0_6"} 
+    {"type": "ONETOUCH", "barrier": "+0.1", "label": "ONETOUCH_0_1"} 
 ]
-
 # ==========================================================
 # BOT RUNTIME STATE
 # ==========================================================
@@ -69,8 +68,8 @@ DEFAULT_SESSION_STATE = {
 # المتغيرات العالمية لعملية Flask الرئيسية (سيتم تهيئتها قبل بدء تشغيل Flask)
 flask_local_processes = {}
 final_check_processes = {}
-active_ws = {} 
-is_contract_open = None 
+active_ws = {}  
+is_contract_open = None  
 # ==========================================================
 
 
@@ -313,7 +312,7 @@ def send_trade_orders(email, base_stake, trade_configs, currency_code, is_martin
 
         try:
             ws_app.send(json.dumps(trade_request))
-            print(f"   [-- {config['label']}] Sent {contract_type} (Barrier: {barrier_offset}) @ {rounded_stake:.2f} {currency_code}")
+            print(f"    [-- {config['label']}] Sent {contract_type} (Barrier: {barrier_offset}) @ {rounded_stake:.2f} {currency_code}")
         except Exception as e:
             print(f"❌ [TRADE ERROR] Could not send trade order for {config['label']}: {e}")
             pass
@@ -363,13 +362,7 @@ def check_pnl_limits_by_balance(email, after_trade_balance):
         print("⚠️ [PNL WARNING] Before trade balance is 0.0. Assuming loss equivalent to stake for safety.")
         total_profit_loss = -last_total_stake
     
-    # 👈 التعديل رقم 3: يتم الآن حساب PNL لكل صفقة بشكل صحيح، ولكننا لا نستخدم current_profit
-    # بل نعتمد على مقارنة الرصيد الحالي بالرصيد الأساسي (Initial Starting Balance) في الواجهة.
-    # ومع ذلك، يجب تحديث total_profit_loss ليتم استخدامه لتحديد حالة الربح/الخسارة.
-
     overall_loss = total_profit_loss < 0
-
-    # current_data['current_profit'] += total_profit_loss # 👈 تم إزالة هذا السطر لعدم الحاجة إليه
 
     stop_triggered = False
 
@@ -542,6 +535,10 @@ def final_check_process(email, token, start_time_ms, time_to_wait_ms, shared_is_
 
         current_data = get_session_data(email)
         current_data['current_balance'] = final_balance
+        
+        # 🟢 [التعديل لتزامن الرصيد] قم بتحديث before_trade_balance ليصبح نفس قيمة الرصيد الحالي
+        current_data['before_trade_balance'] = final_balance
+        
         save_session_data(email, current_data)
         print(f"✅ [FINAL CHECK] Result confirmed. New Balance: {final_balance:.2f}.")
 
@@ -591,7 +588,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             session_data['currency'] = currency_returned
             session_data['is_balance_received'] = True
             
-            # 👈 التعديل رقم 1: تخزين الرصيد الأساسي
+            # 👈 تخزين الرصيد الأساسي وتعيين الرصيد قبل الصفقة
             session_data['initial_starting_balance'] = initial_balance 
             session_data['before_trade_balance'] = initial_balance
             save_session_data(email, session_data)
@@ -636,7 +633,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
         ws.send(json.dumps({"authorize": token}))
         ws.send(json.dumps({"ticks": asset, "subscribe": 1}))
         if not current_data.get('is_balance_received'):
-             ws.send(json.dumps({"balance": 1, "subscribe": 1}))
+              ws.send(json.dumps({"balance": 1, "subscribe": 1}))
 
     def on_message_wrapper(ws_app, message):
         data = json.loads(message)
@@ -771,7 +768,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             print(f"💤 [PROCESS] Waiting {RECONNECT_DELAY} seconds before retrying connection for {email}...")
             time.sleep(RECONNECT_DELAY)
         else:
-             time.sleep(0.5)
+              time.sleep(0.5)
 
 
     print(f"🛑 [PROCESS] Bot process ended for {email}.")
@@ -972,7 +969,7 @@ CONTROL_FORM = """
             Balance BEFORE Trade: <b>{{ session_data.currency }} {{ session_data.before_trade_balance|round(2) }}</b>
         </p>
 
-        {# 👈 التعديل رقم 3: حساب صافي الربح للمستخدم #}
+        {# 👈 حساب صافي الربح للمستخدم #}
         {% set net_profit_display = (session_data.current_balance - session_data.initial_starting_balance) if session_data.current_balance and session_data.initial_starting_balance else 0.0 %}
         <p style="font-weight: bold; color: {% if net_profit_display >= 0 %}green{% else %}red{% endif %};">
             Net Profit: <b>{{ session_data.currency }} {{ net_profit_display|round(2) }}</b> (TP Target: {{ session_data.tp_target|round(2) }})
@@ -1169,8 +1166,8 @@ def start_bot():
 
         # التحقق مرة أخرى من تهيئة القاموس المشترك
         if is_contract_open is None:
-             flash("Bot initialization failed (Shared state manager not ready). Please restart the service.", 'error')
-             return redirect(url_for('control_panel'))
+              flash("Bot initialization failed (Shared state manager not ready). Please restart the service.", 'error')
+              return redirect(url_for('control_panel'))
         
         # 👈 تمرير القاموس المشترك إلى عملية البوت
         process = multiprocessing.Process(
