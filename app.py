@@ -643,19 +643,23 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             }
             current_data['last_tick_data'] = tick_data
 
+            # إضافة التيك الجديد للتاريخ
             current_data['tick_history'].append(tick_data)
 
+            # الحفاظ على حجم التاريخ المطلوب
             if len(current_data['tick_history']) > TICK_HISTORY_SIZE:
                  current_data['tick_history'].pop(0)
 
-            # واجهة العرض
+            # واجهة العرض (UI)
             current_data['display_t1_price'] = current_data['tick_history'][0]['price'] if len(current_data['tick_history']) >= 1 else 0.0
             current_data['display_t4_price'] = current_data['tick_history'][-1]['price'] if len(current_data['tick_history']) >= 2 else 0.0
 
+            # التحقق مما إذا كانت هناك صفقة مفتوحة
             is_open = shared_is_contract_open.get(email) if shared_is_contract_open is not None else False
 
             if is_open is False:
 
+                # التحقق من فاصل الأمان الزمني (5 ثوانٍ بين الصفقات)
                 current_time_ms = time.time() * 1000
                 time_since_last_entry_ms = current_time_ms - current_data['last_entry_time']
                 is_time_gap_respected = time_since_last_entry_ms > 5000 
@@ -664,42 +668,55 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                     save_session_data(email, current_data)
                     return
 
-                # تحليل 5 تيك (T1 إلى T5)
+                # تحليل الـ 5 تيكات بالشرط التتابعي (T1 إلى T5)
                 if len(current_data['tick_history']) == TICK_HISTORY_SIZE:
 
-                    t1_price = current_data['tick_history'][0]['price']
-                    t5_price = current_data['tick_history'][4]['price']
-                    
-                    diff = round(t5_price - t1_price, 4)
+                    t1 = current_data['tick_history'][0]['price']
+                    t2 = current_data['tick_history'][1]['price']
+                    t3 = current_data['tick_history'][2]['price']
+                    t4 = current_data['tick_history'][3]['price']
+                    t5 = current_data['tick_history'][4]['price']
 
                     trade_signal = None 
                     trade_label = None
                     trade_barrier = None
 
-                    # 🚨 الشرط الجديد:
-                    # إذا T5 - T1 >= +0.4 يدخل CALL بحاجز -0.6
-                    if diff >= 0.4:
+                    # --- الشرط الجديد التتابعي ---
+                    
+                    # 1. صعود مستمر: كل تيك أعلى من قبله -> دخول PUT بحاجز +0.6
+                    if t2 > t1 and t3 > t2 and t4 > t3 and t5 > t4:
                         trade_signal = "CALL"
                         trade_label = "CALL_ENTRY"
                         trade_barrier = -0.6
                     
-                    # إذا T5 - T1 <= -0.4 يدخل PUT بحاجز +0.6
-                    elif diff <= -0.4:
+                    # 2. هبوط مستمر: كل تيك أدنى من قبله -> دخول CALL بحاجز -0.6
+                    elif t2 < t1 and t3 < t2 and t4 < t3 and t5 < t4:
                         trade_signal = "PUT"
                         trade_label = "PUT_ENTRY"
                         trade_barrier = +0.6
 
+                    # إرسال الصفقة إذا تحقق الشرط
                     if trade_signal:
                         is_martingale = current_data['current_step'] > 0
-                        send_trade_orders(email, current_data['base_stake'], current_data['currency'], 
-                                         trade_signal, trade_label, trade_barrier, 
-                                         is_martingale=is_martingale, shared_is_contract_open=shared_is_contract_open)
+                        send_trade_orders(
+                            email, 
+                            current_data['base_stake'], 
+                            current_data['currency'], 
+                            trade_signal, 
+                            trade_label, 
+                            trade_barrier, 
+                            is_martingale=is_martingale, 
+                            shared_is_contract_open=shared_is_contract_open
+                        )
 
+                        # تصفير التاريخ فور الدخول لمنع تكرار الإشارة
                         current_data['tick_history'] = []
-                        print(f"🚀 [SIGNAL CONFIRMED] Diff: {diff} -> Executing {trade_signal} @ Barrier {trade_barrier}")
+                        print(f"🚀 [SIGNAL CONFIRMED] {trade_label} Executed | Barrier: {trade_barrier}")
 
                     else:
-                        print(f"🔄 [5-TICK ANALYSIS] Waiting... Current Diff: {diff}")
+                        # اختياري: طباعة لمراقبة تحليل الأسعار الحالي
+                        if int(time.time()) % 2 == 0: # طباعة كل ثانيتين فقط لتقليل الزحام
+                            print(f"🔄 [5-TICK ANALYSIS] Waiting for sequence... T5: {t5}")
 
                 save_session_data(email, current_data)
 
