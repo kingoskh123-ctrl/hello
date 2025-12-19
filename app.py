@@ -14,26 +14,27 @@ from datetime import datetime, timezone
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 # الزوج R_100
 SYMBOL = "R_100"
-# مدة الصفقة 1 تيك (تم التعديل)
-DURATION = 1          
+# مدة الصفقة 5 تيك (تم التعديل حسب طلبك)
+DURATION = 5          
 DURATION_UNIT = "t"
 # تفعيل المضاعفة 2 خطوات (تم التعديل)
-MARTINGALE_STEPS = 2          
+MARTINGALE_STEPS = 0          
 # الحد الأقصى للخسائر المتتالية 3 (تم التعديل)
-MAX_CONSECUTIVE_LOSSES = 3    
+MAX_CONSECUTIVE_LOSSES = 1    
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
-# تحليل 2 تيك 
-TICK_HISTORY_SIZE = 2   
+# تحليل 5 تيك (تم التعديل حسب طلبك)
+TICK_HISTORY_SIZE = 5   
 # مُضاعِف مارتينجال 4.0 (تم التعديل)
 MARTINGALE_MULTIPLIER = 4.0 
 CANDLE_TICK_SIZE = 0
 SYNC_SECONDS = []
 
-# نوع العقد: DIGITOVER مع حاجز 2 (Over 2)
+# نوع العقد: سيتم تحديده ديناميكياً CALL/PUT
 TRADE_CONFIGS = [
-    {"type": "DIGITOVER", "barrier": 2, "label": "OVER_2_ENTRY"}, 
+    {"type": "CALL", "barrier": -0.6, "label": "CALL_ENTRY"}, 
+    {"type": "PUT", "barrier": +0.6, "label": "PUT_ENTRY"}, 
 ]
 
 # ==========================================================
@@ -275,18 +276,12 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
 
     entry_msg = f"MARTINGALE STEP {current_data['current_step']}" if is_martingale else "BASE SIGNAL"
 
-    tick_T1_price = current_data['tick_history'][0]['price'] if len(current_data['tick_history']) >= 2 else 0.0
-    tick_T2_price = current_data['tick_history'][1]['price'] if len(current_data['tick_history']) >= 2 else 0.0
-    
-    # عرض D2 فقط لأغراض التتبع/العرض
-    t1_d2_entry = get_target_digits(tick_T1_price)[1] if len(get_target_digits(tick_T1_price)) >= 2 else 'N/A'
-    t2_d2_entry = get_target_digits(tick_T2_price)[1] if len(get_target_digits(tick_T2_price)) >= 2 else 'N/A'
-
     barrier_display = barrier if barrier is not None else 'N/A'
 
-    print(f"\n💰 [TRADE START] T1 D2: {t1_d2_entry} | T2 D2: {t2_d2_entry} | Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Contract: {contract_type} @ Barrier: {barrier_display}")
+    print(f"\n💰 [TRADE START] Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Contract: {contract_type} @ Barrier: {barrier_display}")
 
     # بناء طلب التداول للصفقة الواحدة
+    # بناء طلب التداول الأساسي
     trade_request = {
         "buy": 1,
         "price": rounded_stake,
@@ -301,9 +296,12 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
         }
     }
     
-    # إضافة الحاجز (Barrier) إذا كان موجوداً
+    # --- التعديل هنا لضمان إرسال الإشارة الصحيحة ---
     if barrier is not None:
-        trade_request["parameters"]["barrier"] = str(barrier)
+        # إذا كان الحاجز أكبر من 0، نضيف إشارة + يدوياً (مثل +0.6)
+        # إذا كان الحاجز أصغر من 0، الإشارة - موجودة أصلاً في الرقم (مثل -0.6)
+        barrier_prefix = "+" if float(barrier) > 0 else ""
+        trade_request["parameters"]["barrier"] = f"{barrier_prefix}{barrier}"
 
 
     try:
@@ -321,8 +319,8 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
 
     save_session_data(email, current_data)
 
-    # وقت التحقق النهائي 6 ثواني (6000 ميلي ثانية)
-    check_time_ms = 6000 
+    # وقت التحقق النهائي 16 ثواني (16000 ميلي ثانية) بناءً على طلبك
+    check_time_ms = 16000 
 
     final_check = multiprocessing.Process(
         target=final_check_process,
@@ -601,15 +599,6 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
     save_session_data(email, session_data)
 
-    def execute_single_trade(email, current_data):
-        is_martingale = current_data['current_step'] > 0
-        base_stake_to_use = current_data['base_stake']
-        currency_code = current_data['currency']
-        
-        # نستخدم الثوابت المعرفة لـ DIGITOVER 2
-        config = TRADE_CONFIGS[0]
-        send_trade_orders(email, base_stake_to_use, currency_code, config['type'], config['label'], config['barrier'], is_martingale=is_martingale, shared_is_contract_open=shared_is_contract_open)
-
     def on_open_wrapper(ws):
         current_data = get_session_data(email)
         token = current_data.get('api_token')
@@ -659,12 +648,9 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             if len(current_data['tick_history']) > TICK_HISTORY_SIZE:
                  current_data['tick_history'].pop(0)
 
-            
-            # نستخدم D2 للتحليل
+            # واجهة العرض
             current_data['display_t1_price'] = current_data['tick_history'][0]['price'] if len(current_data['tick_history']) >= 1 else 0.0
-            current_data['display_t4_price'] = current_data['tick_history'][1]['price'] if len(current_data['tick_history']) >= 2 else 0.0
-            current_data['display_t3_price'] = 0.0
-
+            current_data['display_t4_price'] = current_data['tick_history'][-1]['price'] if len(current_data['tick_history']) >= 2 else 0.0
 
             is_open = shared_is_contract_open.get(email) if shared_is_contract_open is not None else False
 
@@ -672,47 +658,48 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
                 current_time_ms = time.time() * 1000
                 time_since_last_entry_ms = current_time_ms - current_data['last_entry_time']
-                # التأخير الإجباري بين الصفقات
                 is_time_gap_respected = time_since_last_entry_ms > 5000 
 
                 if not is_time_gap_respected:
                     save_session_data(email, current_data)
                     return
 
-                # 🚨🚨 شروط الدخول: T1 D2 = 9 أو 8 و T2 D2 = 9 أو 8 🚨🚨
+                # تحليل 5 تيك (T1 إلى T5)
                 if len(current_data['tick_history']) == TICK_HISTORY_SIZE:
 
-                    tick_T1_price = current_data['tick_history'][0]['price']
-                    tick_T2_price = current_data['tick_history'][1]['price']
+                    t1_price = current_data['tick_history'][0]['price']
+                    t5_price = current_data['tick_history'][4]['price']
                     
-                    digits_T1 = get_target_digits(tick_T1_price)
-                    digits_T2 = get_target_digits(tick_T2_price)
-                    
-                    T1_D2 = digits_T1[1] if len(digits_T1) >= 2 else None 
-                    T2_D2 = digits_T2[1] if len(digits_T2) >= 2 else None 
+                    diff = round(t5_price - t1_price, 4)
 
                     trade_signal = None 
                     trade_label = None
+                    trade_barrier = None
 
-                    # الشرط الجديد: T1 D2 يجب أن يكون 9 أو 8 AND T2 D2 يجب أن يكون 9 أو 8
-                    condition_entry = (T1_D2 in [9, 8]) and (T2_D2 in [9, 8])
+                    # 🚨 الشرط الجديد:
+                    # إذا T5 - T1 >= +0.4 يدخل CALL بحاجز -0.6
+                    if diff >= 0.4:
+                        trade_signal = "CALL"
+                        trade_label = "CALL_ENTRY"
+                        trade_barrier = -0.6
+                    
+                    # إذا T5 - T1 <= -0.4 يدخل PUT بحاجز +0.6
+                    elif diff <= -0.4:
+                        trade_signal = "PUT"
+                        trade_label = "PUT_ENTRY"
+                        trade_barrier = +0.6
 
-                    if condition_entry:
-                        trade_signal = TRADE_CONFIGS[0]['type'] 
-                        trade_label = TRADE_CONFIGS[0]['label'] 
-
-                        execute_single_trade(email, current_data) 
+                    if trade_signal:
+                        is_martingale = current_data['current_step'] > 0
+                        send_trade_orders(email, current_data['base_stake'], current_data['currency'], 
+                                         trade_signal, trade_label, trade_barrier, 
+                                         is_martingale=is_martingale, shared_is_contract_open=shared_is_contract_open)
 
                         current_data['tick_history'] = []
-
-                        print(f"🚀 [IMMEDIATE ENTRY CONFIRMED] {trade_label} Signal: T1 D2={T1_D2} AND T2 D2={T2_D2}. Executing {trade_signal} @ Barrier 2 (Step: {current_data['current_step']}).")
+                        print(f"🚀 [SIGNAL CONFIRMED] Diff: {diff} -> Executing {trade_signal} @ Barrier {trade_barrier}")
 
                     else:
-                        if len(current_data['tick_history']) == TICK_HISTORY_SIZE:
-                            current_data['tick_history'].pop(0)
-
-                        print(f"🔄 [2-TICK ANALYSIS] Condition not met. T1 D2:{T1_D2}, T2 D2:{T2_D2}. Waiting for signal.")
-
+                        print(f"🔄 [5-TICK ANALYSIS] Waiting... Current Diff: {diff}")
 
                 save_session_data(email, current_data)
 
@@ -757,7 +744,6 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
 
     print(f"🛑 [PROCESS] Bot process ended for {email}.")
-
 
 # ==========================================================
 # FLASK APP SETUP AND ROUTES 
@@ -905,61 +891,38 @@ CONTROL_FORM = """
 
 
 {% if session_data and session_data.is_running %}
-    {% set strategy = '2 Ticks (R_100, D2 analysis) -> Entry: DIGITOVER 2 (if T1 D2 & T2 D2 are 9 or 8) | Ticks: ' + TICK_HISTORY_SIZE|string + ' | Duration: ' + DURATION|string + ' Ticks | Martingale: ' + MARTINGALE_STEPS|string + ' Steps (x' + MARTINGALE_MULTIPLIER|string + ') | Max Losses: ' + max_consecutive_losses|string %}
+    {% set strategy = '5 Ticks Analysis (R_100) -> Entry: CALL/PUT (if Diff >= 0.4 or <= -0.4) | Barriers: ±0.6 | Martingale: ' + MARTINGALE_STEPS|string + ' Steps (x' + MARTINGALE_MULTIPLIER|string + ')' %}
 
     <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
 
-    {# Display T1 Price and T2 Price & D2 Digit #}
+    {# عرض سعر T1 وسعر T5 (الأخير) والفرق بينهما #}
     <div class="tick-box">
         {# T1 Display #}
         <div>
-            <span class="info-label">T1 Price:</span> <b>{% if session_data.display_t1_price %}{{ "%0.2f"|format(session_data.display_t1_price) }}{% else %}N/A{% endif %}</b>
-            <br>
-            <span class="info-label">T1 D2:</span>
-            <b class="current-digit">
-            {% set price_str = "%0.2f"|format(session_data.display_t1_price) %}
-            {% set price_parts = price_str.split('.') %}
-            {% set d2_digit_t1 = 'N/A' %}
-            {% if price_parts|length > 1 and price_parts[-1]|length >= 2 %}{% set d2_digit_t1 = price_parts[-1][1] %}{% endif %}
-            {{ d2_digit_t1 }}
-            </b>
-            <p style="font-weight: normal; font-size: 0.8em; color: {% if d2_digit_t1 in ['9', '8'] %}green{% else %}red{% endif %};">
-                Condition: T1 D2 = 9 or 8
-            </p>
+            <span class="info-label">T1 Price (Start):</span> <b>{% if session_data.display_t1_price %}{{ "%0.2f"|format(session_data.display_t1_price) }}{% else %}N/A{% endif %}</b>
         </div>
         
-        {# T2 Display #}
+        {# T5 Display #}
         <div>
-            <span class="info-label">T2 Price (Latest):</span> <b>{% if session_data.display_t4_price %}{{ "%0.2f"|format(session_data.display_t4_price) }}{% else %}N/A{% endif %}</b>
-            <br>
-            <span class="info-label">T2 D2 (Latest):</span>
-            <b class="current-digit">
-            {% set price_str_t2 = "%0.2f"|format(session_data.display_t4_price) %}
-            {% set price_parts_t2 = price_str_t2.split('.') %}
-            {% set d2_digit_t2 = 'N/A' %}
-            {% if price_parts_t2|length > 1 and price_parts_t2[-1]|length >= 2 %}{% set d2_digit_t2 = price_parts_t2[-1][1] %}{% endif %}
-            {{ d2_digit_t2 }}
-            </b>
-            
-            <p style="font-weight: normal; font-size: 0.8em; color: {% if d2_digit_t2 in ['9', '8'] %}green{% else %}red{% endif %};">
-                Condition: T2 D2 = 9 or 8
-            </p>
-            <p style="font-weight: normal; font-size: 0.8em; color: {% if d2_digit_t1 in ['9', '8'] and d2_digit_t2 in ['9', '8'] %}green{% else %}red{% endif %};">
-                Signal: 
-                {% if d2_digit_t1 in ['9', '8'] and d2_digit_t2 in ['9', '8'] %}
-                    OVER 2 (T1 & T2 D2 met)
-                {% else %}
-                    NONE
-                {% endif %}
-            </p>
+            <span class="info-label">T5 Price (Latest):</span> <b>{% if session_data.display_t4_price %}{{ "%0.2f"|format(session_data.display_t4_price) }}{% else %}N/A{% endif %}</b>
         </div>
 
+        {# Difference Calculation #}
+        {% set current_diff = (session_data.display_t4_price - session_data.display_t1_price)|round(4) if session_data.display_t4_price and session_data.display_t1_price else 0.0 %}
+        <div>
+            <span class="info-label">Diff (T5-T1):</span>
+            <b class="current-digit" style="color: {% if current_diff >= 0.4 or current_diff <= -0.4 %}green{% else %}red{% endif %};">
+                {{ current_diff }}
+            </b>
+            <p style="font-weight: normal; font-size: 0.8em;">
+                Threshold: ±0.4
+            </p>
+        </div>
     </div>
 
     <div class="data-box">
         <p>Asset: <b>{{ SYMBOL }}</b> | Account: <b>{{ session_data.account_type.upper() }}</b> | Duration: <b>{{ DURATION }} Ticks</b></p>
 
-        {# 💡 عرض الرصيد #}
         <p style="font-weight: bold; color: #17a2b8;">
             Current Balance: <b>{{ session_data.currency }} {{ session_data.current_balance|round(2) }}</b>
         </p>
@@ -967,7 +930,6 @@ CONTROL_FORM = """
             Balance BEFORE Trade: <b>{{ session_data.currency }} {{ session_data.before_trade_balance|round(2) }}</b>
         </p>
 
-        {# حساب صافي الربح للمستخدم #}
         {% set net_profit_display = (session_data.current_balance - session_data.initial_starting_balance) if session_data.current_balance and session_data.initial_starting_balance else 0.0 %}
         <p style="font-weight: bold; color: {% if net_profit_display >= 0 %}green{% else %}red{% endif %};">
             Net Profit: <b>{{ session_data.currency }} {{ net_profit_display|round(2) }}</b> (TP Target: {{ session_data.tp_target|round(2) }})
@@ -978,9 +940,9 @@ CONTROL_FORM = """
             <b>
             {% set is_open = is_contract_open.get(email) if is_contract_open is not none else false %}
             {% if is_open %}
-                Waiting Check (1 Tick + 6s Delay) (Type: {{ session_data.last_trade_type if session_data.last_trade_type else 'N/A' }})
+                Waiting PNL (16s Delay) (Type: {{ session_data.last_trade_type if session_data.last_trade_type else 'N/A' }})
             {% else %}
-                0 (Ready for Signal)
+                0 (Searching for Signal)
             {% endif %}
             </b>
         </p>
@@ -990,12 +952,12 @@ CONTROL_FORM = """
             <b>
                 {% set is_open = is_contract_open.get(email) if is_contract_open is not none else false %}
                 {% if is_open %}
-                    Awaiting PNL Check (Stake: {{ session_data.current_total_stake|round(2) }})
+                    Awaiting Result (Stake: {{ session_data.current_total_stake|round(2) }})
                 {% else %}
                     {% if session_data.current_step > 0 %}
-                        MARTINGALE STEP {{ session_data.current_step }} @ Stake: {{ session_data.current_total_stake|round(2) }} (Searching 2-Tick Signal)
+                        MARTINGALE STEP {{ session_data.current_step }} @ Stake: {{ session_data.current_total_stake|round(2) }} (Analyzing 5 Ticks)
                     {% else %}
-                        BASE STAKE @ Stake: {{ session_data.current_stake|round(2) }} (Searching 2-Tick Signal)
+                        BASE STAKE @ Stake: {{ session_data.current_stake|round(2) }} (Analyzing 5 Ticks)
                     {% endif %}
                 {% endif %}
             </b>
@@ -1004,7 +966,6 @@ CONTROL_FORM = """
         <p>Current Stake: <b>{{ session_data.currency }} {{ session_data.current_stake|round(2) }}</b></p>
         <p style="font-weight: bold; color: {% if session_data.consecutive_losses > 0 %}red{% else %}green{% endif %};">
         Consecutive Losses: <b>{{ session_data.consecutive_losses }}</b> / {{ max_consecutive_losses }}
-        (Last Entry D2: <b>{{ session_data.last_entry_d2 if session_data.last_entry_d2 is not none else 'N/A' }}</b>)
         </p>
         <p style="font-weight: bold; color: green;">Total Wins: {{ session_data.total_wins }} | Total Losses: {{ session_data.total_losses }}</p>
         <p style="font-weight: bold; color: #007bff;">Current Strategy: {{ strategy }}</p>
