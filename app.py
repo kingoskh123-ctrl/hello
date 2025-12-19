@@ -18,23 +18,23 @@ SYMBOL = "R_100"
 DURATION = 5          
 DURATION_UNIT = "t"
 # تفعيل المضاعفة 2 خطوات (تم التعديل)
-MARTINGALE_STEPS = 0          
+MARTINGALE_STEPS = 1          
 # الحد الأقصى للخسائر المتتالية 3 (تم التعديل)
-MAX_CONSECUTIVE_LOSSES = 1    
+MAX_CONSECUTIVE_LOSSES = 2    
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 # تحليل 5 تيك (تم التعديل حسب طلبك)
 TICK_HISTORY_SIZE = 5   
 # مُضاعِف مارتينجال 4.0 (تم التعديل)
-MARTINGALE_MULTIPLIER = 4.0 
+MARTINGALE_MULTIPLIER = 14.0 
 CANDLE_TICK_SIZE = 0
 SYNC_SECONDS = []
 
 # نوع العقد: سيتم تحديده ديناميكياً CALL/PUT
 TRADE_CONFIGS = [
-    {"type": "CALL", "barrier": -0.6, "label": "CALL_ENTRY"}, 
-    {"type": "PUT", "barrier": +0.6, "label": "PUT_ENTRY"}, 
+    {"type": "CALL", "barrier": +0.05, "label": "CALL_ENTRY"}, 
+    {"type": "PUT", "barrier": -0.05, "label": "PUT_ENTRY"}, 
 ]
 
 # ==========================================================
@@ -630,8 +630,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             save_session_data(email, current_data)
 
         elif msg_type == 'tick':
-
-            if current_data['is_balance_received'] == False:
+            if current_data.get('is_balance_received') == False:
                 return
 
             current_timestamp = int(data['tick']['epoch'])
@@ -648,7 +647,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
             # الحفاظ على حجم التاريخ المطلوب
             if len(current_data['tick_history']) > TICK_HISTORY_SIZE:
-                 current_data['tick_history'].pop(0)
+                current_data['tick_history'].pop(0)
 
             # واجهة العرض (UI)
             current_data['display_t1_price'] = current_data['tick_history'][0]['price'] if len(current_data['tick_history']) >= 1 else 0.0
@@ -658,7 +657,6 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             is_open = shared_is_contract_open.get(email) if shared_is_contract_open is not None else False
 
             if is_open is False:
-
                 # التحقق من فاصل الأمان الزمني (5 ثوانٍ بين الصفقات)
                 current_time_ms = time.time() * 1000
                 time_since_last_entry_ms = current_time_ms - current_data['last_entry_time']
@@ -670,53 +668,34 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
                 # تحليل الـ 5 تيكات بالشرط التتابعي (T1 إلى T5)
                 if len(current_data['tick_history']) == TICK_HISTORY_SIZE:
-
                     t1 = current_data['tick_history'][0]['price']
                     t2 = current_data['tick_history'][1]['price']
                     t3 = current_data['tick_history'][2]['price']
                     t4 = current_data['tick_history'][3]['price']
                     t5 = current_data['tick_history'][4]['price']
 
-                    trade_signal = None 
-                    trade_label = None
-                    trade_barrier = None
+                    # فحص الشروط التتابعية (صعود أو هبوط)
+                    is_seq_up = t2 > t1 and t3 > t2 and t4 > t3 and t5 > t4
+                    is_seq_down = t2 < t1 and t3 < t2 and t4 < t3 and t5 < t4
 
-                    # --- الشرط الجديد التتابعي ---
-                    
-                    # 1. صعود مستمر: كل تيك أعلى من قبله -> دخول PUT بحاجز +0.6
-                    if t2 > t1 and t3 > t2 and t4 > t3 and t5 > t4:
+                    # --- الدخول المزدوج ---
+                    if is_seq_up or is_seq_down:
+                        is_martingale = current_data['current_step'] > 0
+                        
+                        # الصفقة الأولى
                         trade_signal = "CALL"
                         trade_label = "CALL_ENTRY"
-                        trade_barrier = -0.6
-                    
-                    # 2. هبوط مستمر: كل تيك أدنى من قبله -> دخول CALL بحاجز -0.6
-                    elif t2 < t1 and t3 < t2 and t4 < t3 and t5 < t4:
+                        trade_barrier = +0.05
+                        send_trade_orders(email, current_data['base_stake'], current_data['currency'], trade_signal, trade_label, trade_barrier, is_martingale=is_martingale, shared_is_contract_open=shared_is_contract_open)
+
+                        # الصفقة الثانية
                         trade_signal = "PUT"
                         trade_label = "PUT_ENTRY"
-                        trade_barrier = +0.6
+                        trade_barrier = -0.05
+                        send_trade_orders(email, current_data['base_stake'], current_data['currency'], trade_signal, trade_label, trade_barrier, is_martingale=is_martingale, shared_is_contract_open=shared_is_contract_open)
 
-                    # إرسال الصفقة إذا تحقق الشرط
-                    if trade_signal:
-                        is_martingale = current_data['current_step'] > 0
-                        send_trade_orders(
-                            email, 
-                            current_data['base_stake'], 
-                            current_data['currency'], 
-                            trade_signal, 
-                            trade_label, 
-                            trade_barrier, 
-                            is_martingale=is_martingale, 
-                            shared_is_contract_open=shared_is_contract_open
-                        )
-
-                        # تصفير التاريخ فور الدخول لمنع تكرار الإشارة
                         current_data['tick_history'] = []
-                        print(f"🚀 [SIGNAL CONFIRMED] {trade_label} Executed | Barrier: {trade_barrier}")
-
-                    else:
-                        # اختياري: طباعة لمراقبة تحليل الأسعار الحالي
-                        if int(time.time()) % 2 == 0: # طباعة كل ثانيتين فقط لتقليل الزحام
-                            print(f"🔄 [5-TICK ANALYSIS] Waiting for sequence... T5: {t5}")
+                        print(f"🚀 [DOUBLE ENTRY] CALL & PUT Executed")
 
                 save_session_data(email, current_data)
 
