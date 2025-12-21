@@ -646,41 +646,42 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
             current_price = float(data['tick']['quote'])
             
-            # وظيفة لاستخراج الرقم العشري الثالث D3 لزوج R_10
-            def get_d2(price):
+            # --- الوظيفة التي تضمن إضافة الصفر وقراءة D2 ---
+            def get_fixed_d2(price):
                 try:
-                    # التنسيق لـ 3 أرقام بعد الفاصلة
+                    # {:.2f} تجبر الرقم 10.5 على التحول لنص "10.50"
                     s_price = "{:.2f}".format(float(price))
-                    return int(s_price[-1]) 
+                    return int(s_price[-1]) # يأخذ الصفر المضاف أو الرقم الموجود
                 except:
                     return None
 
             tick_info = {
                 "price": current_price,
-                "d2": get_d2(current_price),
+                "d2": get_fixed_d2(current_price),
                 "timestamp": int(data['tick']['epoch'])
             }
 
-            # تحديث تاريخ التيكات (نحتاج 3 للتحليل)
+            # تحديث التاريخ (نحتفظ بآخر 3 تيكات)
             current_data['tick_history'].append(tick_info)
-            if len(current_data['tick_history']) > 2:
+            if len(current_data['tick_history']) > 3: # تم تعديلها من 2 إلى 3 لضمان وجود T1, T2, T3
                 current_data['tick_history'].pop(0)
 
             is_open = shared_is_contract_open.get(email, False)
             
+            # فحص الشرط عند اكتمال 3 تيكات
             if not is_open and len(current_data['tick_history']) == 3:
                 t1 = current_data['tick_history'][0]['price']
                 t2 = current_data['tick_history'][1]['price']
                 t3 = current_data['tick_history'][2]['price']
                 d2_t3 = current_data['tick_history'][2]['d2']
 
-                # --- الاستراتيجية: هبوط متتالي (T1 > T2 > T3) و الرقم الثالث هو 9 ---
-                if (t1 < t2 < t3) and (d2_t3 == 0):
-                    is_martingale = current_data['current_step'] > 0
+                # --- الاستراتيجية: صعود متتالي (T3 > T2 > T1) وَ d2_t3 هو 0 ---
+                if (t3 > t2 > t1) and (d2_t3 == 0):
                     stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
                     
-                    # تسجيل الرصيد قبل الصفقة
+                    # تسجيل الرصيد قبل الصفقة فوراً وحفظه
                     current_data['before_trade_balance'] = current_data.get('current_balance', 0.0)
+                    save_session_data(email, current_data)
 
                     trade_request = {
                         "buy": 1,
@@ -689,11 +690,11 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                             "amount": stake,
                             "basis": "stake",
                             "currency": current_data['currency'],
-                            "duration": 5,           # تم التعديل إلى 5 تيكات
+                            "duration": 5,
                             "duration_unit": "t",
                             "symbol": "R_100",
                             "contract_type": "PUT",
-                            "barrier": "+0.6"
+                            "barrier": "+0.6" # الحاجز المطلوب
                         }
                     }
 
@@ -701,25 +702,22 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                         active_ws[email].send(json.dumps(trade_request))
                         shared_is_contract_open[email] = True
                         current_data['last_entry_time'] = time.time() * 1000
-                        current_data['current_stake'] = stake
                         
+                        # تصفير التاريخ لمنع الدخول المتكرر على نفس التيك
                         current_data['tick_history'] = []
 
-                        # بما أن الصفقة مدتها 5 تيكات، نحتاج لزيادة وقت الانتظار للفحص
-                        # 12000 مللي ثانية (12 ثانية) كافية لانتهاء 5 تيكات وتحديث الرصيد
+                        # فحص النتيجة بعد 12 ثانية (لأن الصفقة 5 تيكات)
                         check_proc = multiprocessing.Process(
                             target=final_check_process,
                             args=(email, current_data['api_token'], current_data['last_entry_time'], 12000, shared_is_contract_open)
                         )
                         check_proc.start()
-                        final_check_processes[email] = check_proc
                         
-                        print(f"📉 [PUT 5-TICKS] Barrier: +0.3 | Trend: DOWN | D3: 9 | Stake: {stake}")
+                        print(f"📈 [MATCH] Trend: UP | D2: {d2_t3} | Sending PUT +0.6")
                     except Exception as e:
                         print(f"❌ [ORDER ERROR] {e}")
 
             save_session_data(email, current_data)
-
     def on_close_wrapper(ws_app, code, msg):
         print(f"❌ [WS Close {email}] Code: {code}, Message: {msg}")
         if email in active_ws:
