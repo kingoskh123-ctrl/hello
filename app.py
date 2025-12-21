@@ -647,23 +647,23 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             current_price = float(data['tick']['quote'])
             
             # وظيفة لاستخراج الرقم العشري الثالث D3 لزوج R_10
-            def get_d3(price):
+            def get_d2(price):
                 try:
                     # التنسيق لـ 3 أرقام بعد الفاصلة
-                    s_price = "{:.3f}".format(float(price))
+                    s_price = "{:.2f}".format(float(price))
                     return int(s_price[-1]) 
                 except:
                     return None
 
             tick_info = {
                 "price": current_price,
-                "d3": get_d3(current_price),
+                "d2": get_d2(current_price),
                 "timestamp": int(data['tick']['epoch'])
             }
 
             # تحديث تاريخ التيكات (نحتاج 3 للتحليل)
             current_data['tick_history'].append(tick_info)
-            if len(current_data['tick_history']) > 3:
+            if len(current_data['tick_history']) > 2:
                 current_data['tick_history'].pop(0)
 
             is_open = shared_is_contract_open.get(email, False)
@@ -675,7 +675,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                 d3_t3 = current_data['tick_history'][2]['d3']
 
                 # --- الاستراتيجية: هبوط متتالي (T1 > T2 > T3) و الرقم الثالث هو 9 ---
-                if (t1 < t2 < t3) and (d3_t3 == 0):
+                if (t1 < t2 < t3) and (d2_t3 == 0):
                     is_martingale = current_data['current_step'] > 0
                     stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
                     
