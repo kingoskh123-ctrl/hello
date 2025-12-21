@@ -15,7 +15,7 @@ WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 # الزوج R_100
 SYMBOL = "R_100"
 # مدة الصفقة 5 تيك (تم التعديل حسب طلبك)
-DURATION = 1          
+DURATION = 5          
 DURATION_UNIT = "t"
 # تفعيل المضاعفة 2 خطوات (تم التعديل)
 MARTINGALE_STEPS = 1          
@@ -27,7 +27,7 @@ ACTIVE_SESSIONS_FILE = "active_sessions.json"
 # تحليل 5 تيك (تم التعديل حسب طلبك)
 TICK_HISTORY_SIZE = 3   
 # مُضاعِف مارتينجال 4.0 (تم التعديل)
-MARTINGALE_MULTIPLIER = 14.0 
+MARTINGALE_MULTIPLIER = 49.0 
 CANDLE_TICK_SIZE = 0
 SYNC_SECONDS = []
 
@@ -325,7 +325,7 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
         save_session_data(email, current_data)
 
         # وقت التحقق النهائي 16 ثواني (16000 ميلي ثانية) بناءً على طلبك
-        check_time_ms = 6000 
+        check_time_ms = 18000 
 
         final_check = multiprocessing.Process(
             target=final_check_process,
@@ -646,22 +646,22 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
             current_price = float(data['tick']['quote'])
             
-            # وظيفة لاستخراج الرقم العشري الثاني D2
-            def get_d2(price):
+            # وظيفة لاستخراج الرقم العشري الثالث D3 لزوج R_10
+            def get_d3(price):
                 try:
-                    # تحويل السعر لنص وتنسيقه لخانين عشريين لضمان الدقة
-                    s_price = "{:.2f}".format(float(price))
-                    return int(s_price[-1]) # الرقم الأخير في التنسيق .XX هو D2
+                    # التنسيق لـ 3 أرقام بعد الفاصلة
+                    s_price = "{:.3f}".format(float(price))
+                    return int(s_price[-1]) 
                 except:
                     return None
 
             tick_info = {
                 "price": current_price,
-                "d2": get_d2(current_price),
+                "d3": get_d3(current_price),
                 "timestamp": int(data['tick']['epoch'])
             }
 
-            # تحديث التاريخ (نحتاج 3 تيكات فقط للتحليل: T1, T2, T3)
+            # تحديث تاريخ التيكات (نحتاج 3 للتحليل)
             current_data['tick_history'].append(tick_info)
             if len(current_data['tick_history']) > 3:
                 current_data['tick_history'].pop(0)
@@ -669,18 +669,17 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             is_open = shared_is_contract_open.get(email, False)
             
             if not is_open and len(current_data['tick_history']) == 3:
-                # استخراج D2 لكل تيك في التاريخ
-                d2_t1 = current_data['tick_history'][0]['d2']
-                d2_t2 = current_data['tick_history'][1]['d2'] # متوفر إذا احتجت استخدامه لاحقاً
-                d2_t3 = current_data['tick_history'][2]['d2']
+                t1 = current_data['tick_history'][0]['price']
+                t2 = current_data['tick_history'][1]['price']
+                t3 = current_data['tick_history'][2]['price']
+                d3_t3 = current_data['tick_history'][2]['d3']
 
-                # --- تطبيق الاستراتيجية الجديدة ---
-                # الشرط: الرقم العشري الثاني للتيك الأول هو 4 وَ الرقم العشري الثاني للتيك الثالث هو 4
-                if d2_t1 == 4 and d2_t3 == 4:
+                # --- الاستراتيجية: هبوط متتالي (T1 > T2 > T3) و الرقم الثالث هو 9 ---
+                if (t1 < t2 < t3) and (d3_t3 == 0):
                     is_martingale = current_data['current_step'] > 0
                     stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
                     
-                    # تسجيل الرصيد الحالي كـ "رصيد ما قبل الصفقة" لضمان دقة حساب الـ PNL لاحقاً
+                    # تسجيل الرصيد قبل الصفقة
                     current_data['before_trade_balance'] = current_data.get('current_balance', 0.0)
 
                     trade_request = {
@@ -690,11 +689,11 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                             "amount": stake,
                             "basis": "stake",
                             "currency": current_data['currency'],
-                            "duration": 1, 
+                            "duration": 5,           # تم التعديل إلى 5 تيكات
                             "duration_unit": "t",
-                            "symbol": SYMBOL,
-                            "contract_type": "DIGITDIFF",
-                            "barrier": 4 
+                            "symbol": "R_100",
+                            "contract_type": "PUT",
+                            "barrier": "+0.6"
                         }
                     }
 
@@ -704,18 +703,18 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                         current_data['last_entry_time'] = time.time() * 1000
                         current_data['current_stake'] = stake
                         
-                        # تصفير التاريخ بعد الدخول لمنع التكرار على نفس الإشارة
                         current_data['tick_history'] = []
 
-                        # فحص النتيجة بعد 5 ثوانٍ (أو 6 ثوانٍ لضمان استلام نتيجة المضاعفة بدقة)
+                        # بما أن الصفقة مدتها 5 تيكات، نحتاج لزيادة وقت الانتظار للفحص
+                        # 12000 مللي ثانية (12 ثانية) كافية لانتهاء 5 تيكات وتحديث الرصيد
                         check_proc = multiprocessing.Process(
                             target=final_check_process,
-                            args=(email, current_data['api_token'], current_data['last_entry_time'], 5000, shared_is_contract_open)
+                            args=(email, current_data['api_token'], current_data['last_entry_time'], 12000, shared_is_contract_open)
                         )
                         check_proc.start()
                         final_check_processes[email] = check_proc
                         
-                        print(f"🎯 [STRATEGY MATCH] D2_T1: {d2_t1} | D2_T3: {d2_t3} | Entering DIGITDIFF4 | Stake: {stake}")
+                        print(f"📉 [PUT 5-TICKS] Barrier: +0.3 | Trend: DOWN | D3: 9 | Stake: {stake}")
                     except Exception as e:
                         print(f"❌ [ORDER ERROR] {e}")
 
