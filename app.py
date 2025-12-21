@@ -672,7 +672,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                 t1 = current_data['tick_history'][0]['price']
                 t2 = current_data['tick_history'][1]['price']
                 t3 = current_data['tick_history'][2]['price']
-                d3_t3 = current_data['tick_history'][2]['d3']
+                d2_t3 = current_data['tick_history'][2]['d2']
 
                 # --- الاستراتيجية: هبوط متتالي (T1 > T2 > T3) و الرقم الثالث هو 9 ---
                 if (t1 < t2 < t3) and (d2_t3 == 0):
