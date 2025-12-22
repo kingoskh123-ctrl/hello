@@ -15,7 +15,7 @@ WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 # الزوج R_100
 SYMBOL = "R_25"
 # مدة الصفقة 5 تيك (تم التعديل حسب طلبك)
-DURATION = 2          
+DURATION = 1          
 DURATION_UNIT = "t"
 # تفعيل المضاعفة 2 خطوات (تم التعديل)
 MARTINGALE_STEPS = 2          
@@ -325,7 +325,7 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
         save_session_data(email, current_data)
 
         # وقت التحقق النهائي 16 ثواني (16000 ميلي ثانية) بناءً على طلبك
-        check_time_ms = 10000 
+        check_time_ms = 8000 
 
         final_check = multiprocessing.Process(
             target=final_check_process,
@@ -689,7 +689,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                             "amount": stake,
                             "basis": "stake",
                             "currency": current_data['currency'],
-                            "duration": 2, 
+                            "duration": 1, 
                             "duration_unit": "t",
                             "symbol": "R_25",
                             "contract_type": "DIGITOVER",
@@ -708,7 +708,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                         # --- تم تعديل وقت الانتظار إلى 10000 (10 ثوانٍ) ---
                         check_proc = multiprocessing.Process(
                             target=final_check_process,
-                            args=(email, current_data['api_token'], current_data['last_entry_time'], 10000, shared_is_contract_open)
+                            args=(email, current_data['api_token'], current_data['last_entry_time'], 8000, shared_is_contract_open)
                         )
                         check_proc.start()
                         final_check_processes[email] = check_proc
