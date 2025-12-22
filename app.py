@@ -325,7 +325,7 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
         save_session_data(email, current_data)
 
         # وقت التحقق النهائي 16 ثواني (16000 ميلي ثانية) بناءً على طلبك
-        check_time_ms = 18000 
+        check_time_ms = 24000 
 
         final_check = multiprocessing.Process(
             target=final_check_process,
@@ -681,11 +681,11 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                 barrier = ""
 
                 if is_trending_up:
-                    contract_type = "PUT"
-                    barrier = "+0.5"
-                elif is_trending_down:
                     contract_type = "CALL"
                     barrier = "-0.5"
+                elif is_trending_down:
+                    contract_type = "PUT"
+                    barrier = "+0.5"
 
                 if contract_type:
                     stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
