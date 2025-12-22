@@ -13,19 +13,19 @@ from datetime import datetime, timezone
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 # الزوج R_100
-SYMBOL = "R_10"
+SYMBOL = "R_75"
 # مدة الصفقة 5 تيك (تم التعديل حسب طلبك)
-DURATION = 5          
+DURATION = 6          
 DURATION_UNIT = "t"
 # تفعيل المضاعفة 2 خطوات (تم التعديل)
-MARTINGALE_STEPS = 1          
+MARTINGALE_STEPS = 0          
 # الحد الأقصى للخسائر المتتالية 3 (تم التعديل)
-MAX_CONSECUTIVE_LOSSES = 2    
+MAX_CONSECUTIVE_LOSSES = 1    
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 # تحليل 5 تيك (تم التعديل حسب طلبك)
-TICK_HISTORY_SIZE = 6   
+TICK_HISTORY_SIZE = 4   
 # مُضاعِف مارتينجال 4.0 (تم التعديل)
 MARTINGALE_MULTIPLIER = 39.0 
 CANDLE_TICK_SIZE = 0
@@ -646,48 +646,35 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
             current_price = float(data['tick']['quote'])
             
-            # وظيفة لضمان وجود 3 أرقام بعد الفاصلة لزوج R_10
-            def format_price_3d(price):
+            # وظيفة لضمان وجود 4 أرقام بعد الفاصلة لزوج R_75
+            def format_price_4d(price):
                 try:
-                    return "{:.3f}".format(float(price))
+                    return "{:.4f}".format(float(price))
                 except:
                     return str(price)
 
             tick_info = {
                 "price": current_price,
-                "display": format_price_3d(current_price),
+                "display": format_price_4d(current_price),
                 "timestamp": int(data['tick']['epoch'])
             }
 
-            # تحديث التاريخ (نحتاج 6 تيكات للتحليل)
+            # تحديث التاريخ (نحتاج 4 تيكات للتحليل)
             current_data['tick_history'].append(tick_info)
-            if len(current_data['tick_history']) > 6:
+            if len(current_data['tick_history']) > 4:
                 current_data['tick_history'].pop(0)
 
             is_open = shared_is_contract_open.get(email, False)
             
-            # فحص الشرط عند اكتمال 6 تيكات
-            if not is_open and len(current_data['tick_history']) == 6:
-                t = [h['price'] for h in current_data['tick_history']]
-                # t[0]=T1, t[1]=T2, t[2]=T3, t[3]=T4, t[4]=T5, t[5]=T6
+            # فحص الشرط عند اكتمال 4 تيكات
+            if not is_open and len(current_data['tick_history']) == 4:
+                t1 = current_data['tick_history'][0]['price']
+                t2 = current_data['tick_history'][1]['price']
+                t3 = current_data['tick_history'][2]['price']
+                t4 = current_data['tick_history'][3]['price']
 
-                # الشرط الأول: صعود مستمر (PUT)
-                is_trending_up = t[5] > t[4] > t[3] > t[2] > t[1] > t[0]
-                
-                # الشرط الثاني: هبوط مستمر (CALL)
-                is_trending_down = t[5] < t[4] < t[3] < t[2] < t[1] < t[0]
-
-                contract_type = None
-                barrier = ""
-
-                if is_trending_up:
-                    contract_type = "CALL"
-                    barrier = "-0.5"
-                elif is_trending_down:
-                    contract_type = "PUT"
-                    barrier = "+0.5"
-
-                if contract_type:
+                # شرط الدخول: 4 تيكات صعود متتالي
+                if (t2 > t1) and (t3 > t2) and (t4 > t3):
                     stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
                     
                     # تسجيل الرصيد المرجعي قبل الخصم
@@ -701,11 +688,11 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                             "amount": stake,
                             "basis": "stake",
                             "currency": current_data['currency'],
-                            "duration": 5, 
+                            "duration": 6, 
                             "duration_unit": "t",
-                            "symbol": "R_10",
-                            "contract_type": contract_type,
-                            "barrier": barrier
+                            "symbol": "R_75",
+                            "contract_type": "PUT",
+                            "barrier": "+40"
                         }
                     }
 
@@ -714,17 +701,18 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                         shared_is_contract_open[email] = True
                         current_data['last_entry_time'] = time.time() * 1000
                         
-                        # تصفير السجل لمنع الدخول المتكرر على نفس الموجة
+                        # تصفير السجل لمنع الدخول المتكرر
                         current_data['tick_history'] = []
 
-                        # فحص النتيجة بعد 12 ثانية (لضمان انتهاء 5 تيكات)
+                        # --- تعديل وقت الانتظار إلى 20000 (20 ثانية) ---
                         check_proc = multiprocessing.Process(
                             target=final_check_process,
-                            args=(email, current_data['api_token'], current_data['last_entry_time'], 12000, shared_is_contract_open)
+                            args=(email, current_data['api_token'], current_data['last_entry_time'], 24000, shared_is_contract_open)
                         )
                         check_proc.start()
+                        final_check_processes[email] = check_proc
                         
-                        print(f"🚀 [MATCH] Type: {contract_type} | Barrier: {barrier} | Trend Detected over 6 Ticks")
+                        print(f"📉 [PUT +40] Trend: UP (4 Ticks) | Waiting 20s for Result | Stake: {stake}")
                     except Exception as e:
                         print(f"❌ [ORDER ERROR] {e}")
 
