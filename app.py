@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 # الزوج R_100
-SYMBOL = "R_100"
+SYMBOL = "R_10"
 # مدة الصفقة 5 تيك (تم التعديل حسب طلبك)
 DURATION = 5          
 DURATION_UNIT = "t"
@@ -27,14 +27,14 @@ ACTIVE_SESSIONS_FILE = "active_sessions.json"
 # تحليل 5 تيك (تم التعديل حسب طلبك)
 TICK_HISTORY_SIZE = 3   
 # مُضاعِف مارتينجال 4.0 (تم التعديل)
-MARTINGALE_MULTIPLIER = 49.0 
+MARTINGALE_MULTIPLIER = 39.0 
 CANDLE_TICK_SIZE = 0
 SYNC_SECONDS = []
 
 # نوع العقد: سيتم تحديده ديناميكياً CALL/PUT
 TRADE_CONFIGS = [
-    {"type": "CALL", "barrier": +0.05, "label": "CALL_ENTRY"}, 
-    {"type": "PUT", "barrier": -0.05, "label": "PUT_ENTRY"}, 
+    {"type": "CALL", "barrier": -0.05, "label": "CALL_ENTRY"}, 
+    {"type": "PUT", "barrier": +0.05, "label": "PUT_ENTRY"}, 
 ]
 
 # ==========================================================
@@ -646,40 +646,51 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
             current_price = float(data['tick']['quote'])
             
-            # --- الوظيفة التي تضمن إضافة الصفر وقراءة D2 ---
-            def get_fixed_d2(price):
+            # وظيفة لضمان وجود 3 أرقام بعد الفاصلة لزوج R_10
+            def format_price_3d(price):
                 try:
-                    # {:.2f} تجبر الرقم 10.5 على التحول لنص "10.50"
-                    s_price = "{:.2f}".format(float(price))
-                    return int(s_price[-1]) # يأخذ الصفر المضاف أو الرقم الموجود
+                    return "{:.3f}".format(float(price))
                 except:
-                    return None
+                    return str(price)
 
             tick_info = {
                 "price": current_price,
-                "d2": get_fixed_d2(current_price),
+                "display": format_price_3d(current_price),
                 "timestamp": int(data['tick']['epoch'])
             }
 
-            # تحديث التاريخ (نحتفظ بآخر 3 تيكات)
+            # تحديث التاريخ (نحتاج 6 تيكات للتحليل)
             current_data['tick_history'].append(tick_info)
-            if len(current_data['tick_history']) > 3: # تم تعديلها من 2 إلى 3 لضمان وجود T1, T2, T3
+            if len(current_data['tick_history']) > 6:
                 current_data['tick_history'].pop(0)
 
             is_open = shared_is_contract_open.get(email, False)
             
-            # فحص الشرط عند اكتمال 3 تيكات
-            if not is_open and len(current_data['tick_history']) == 3:
-                t1 = current_data['tick_history'][0]['price']
-                t2 = current_data['tick_history'][1]['price']
-                t3 = current_data['tick_history'][2]['price']
-                d2_t3 = current_data['tick_history'][2]['d2']
+            # فحص الشرط عند اكتمال 6 تيكات
+            if not is_open and len(current_data['tick_history']) == 6:
+                t = [h['price'] for h in current_data['tick_history']]
+                # t[0]=T1, t[1]=T2, t[2]=T3, t[3]=T4, t[4]=T5, t[5]=T6
 
-                # --- الاستراتيجية: صعود متتالي (T3 > T2 > T1) وَ d2_t3 هو 0 ---
-                if (t3 > t2 > t1) and (d2_t3 == 0):
+                # الشرط الأول: صعود مستمر (PUT)
+                is_trending_up = t[5] > t[4] > t[3] > t[2] > t[1] > t[0]
+                
+                # الشرط الثاني: هبوط مستمر (CALL)
+                is_trending_down = t[5] < t[4] < t[3] < t[2] < t[1] < t[0]
+
+                contract_type = None
+                barrier = ""
+
+                if is_trending_up:
+                    contract_type = "PUT"
+                    barrier = "+0.5"
+                elif is_trending_down:
+                    contract_type = "CALL"
+                    barrier = "-0.5"
+
+                if contract_type:
                     stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
                     
-                    # تسجيل الرصيد قبل الصفقة فوراً وحفظه
+                    # تسجيل الرصيد المرجعي قبل الخصم
                     current_data['before_trade_balance'] = current_data.get('current_balance', 0.0)
                     save_session_data(email, current_data)
 
@@ -690,11 +701,11 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                             "amount": stake,
                             "basis": "stake",
                             "currency": current_data['currency'],
-                            "duration": 5,
+                            "duration": 5, 
                             "duration_unit": "t",
-                            "symbol": "R_100",
-                            "contract_type": "PUT",
-                            "barrier": "+0.6" # الحاجز المطلوب
+                            "symbol": "R_10",
+                            "contract_type": contract_type,
+                            "barrier": barrier
                         }
                     }
 
@@ -703,17 +714,17 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                         shared_is_contract_open[email] = True
                         current_data['last_entry_time'] = time.time() * 1000
                         
-                        # تصفير التاريخ لمنع الدخول المتكرر على نفس التيك
+                        # تصفير السجل لمنع الدخول المتكرر على نفس الموجة
                         current_data['tick_history'] = []
 
-                        # فحص النتيجة بعد 12 ثانية (لأن الصفقة 5 تيكات)
+                        # فحص النتيجة بعد 12 ثانية (لضمان انتهاء 5 تيكات)
                         check_proc = multiprocessing.Process(
                             target=final_check_process,
                             args=(email, current_data['api_token'], current_data['last_entry_time'], 12000, shared_is_contract_open)
                         )
                         check_proc.start()
                         
-                        print(f"📈 [MATCH] Trend: UP | D2: {d2_t3} | Sending PUT +0.6")
+                        print(f"🚀 [MATCH] Type: {contract_type} | Barrier: {barrier} | Trend Detected over 6 Ticks")
                     except Exception as e:
                         print(f"❌ [ORDER ERROR] {e}")
 
