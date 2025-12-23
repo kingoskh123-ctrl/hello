@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 # الزوج R_100
-SYMBOL = "R_100"
+SYMBOL = "R_25"
 # مدة الصفقة 5 تيك (تم التعديل حسب طلبك)
 DURATION = 1          
 DURATION_UNIT = "t"
@@ -646,38 +646,36 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
             current_price = float(data['tick']['quote'])
             
-            # وظيفة لضمان رقمين بعد الفاصلة واستخراج D2 لزوج R_100
-            def get_d2(price):
+            # وظيفة استخراج الرقم العشري الثالث D3 لزوج R_25 (3 أرقام بعد الفاصلة)
+            def get_d3(price):
                 try:
-                    s_price = "{:.2f}".format(float(price))
+                    # التنسيق لـ 3 أرقام يضمن قراءة الخانة الثالثة بدقة حتى لو كانت صفراً
+                    s_price = "{:.3f}".format(float(price))
                     return int(s_price[-1]) 
                 except:
                     return None
 
             tick_info = {
                 "price": current_price,
-                "d2": get_d2(current_price),
+                "d3": get_d3(current_price),
                 "timestamp": int(data['tick']['epoch'])
             }
 
-            # تحديث تاريخ التيكات (نحتاج تيكين فقط للتحليل)
+            # تحديث تاريخ التيكات (نحتاج تيكين فقط للتحليل: T1, T2)
             current_data['tick_history'].append(tick_info)
             if len(current_data['tick_history']) > 2:
                 current_data['tick_history'].pop(0)
 
             is_open = shared_is_contract_open.get(email, False)
             
-            # فحص الشرط عند اكتمال تيكين (T1 و T2)
+            # فحص الشرط عند اكتمال تيكين في السجل
             if not is_open and len(current_data['tick_history']) == 2:
                 t1 = current_data['tick_history'][0]['price']
                 t2 = current_data['tick_history'][1]['price']
-                d2_t2 = current_data['tick_history'][1]['d2']
+                d3_t2 = current_data['tick_history'][1]['d3']
 
-                # حساب الفرق المطلق بين التيكين بدقة رقمين عشريين
-                diff = round(abs(t2 - t1), 2)
-
-                # --- الشرط: الفرق يساوي 0.1 أو 0.2 ---
-                if diff == 0.1 or diff == 0.2:
+                # --- الاستراتيجية: T2 أصغر من T1 (هبوط) وَ الرقم الثالث لـ T2 هو 2 ---
+                if (t2 < t1) and (d3_t2 == 2):
                     stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
                     
                     # تسجيل الرصيد المرجعي قبل الخصم
@@ -693,9 +691,9 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                             "currency": current_data['currency'],
                             "duration": 1, 
                             "duration_unit": "t",
-                            "symbol": "R_100",
+                            "symbol": "R_25",
                             "contract_type": "DIGITDIFF",
-                            "barrier": d2_t2  # الرهان أن الرقم القادم لن يكون D2 الحالي
+                            "barrier": 2  # الرهان أن التيك القادم لن ينتهي بـ 2
                         }
                     }
 
@@ -714,7 +712,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                         )
                         check_proc.start()
                         
-                        print(f"🎯 [DIGITDIFF] R_100 | Diff: {diff} | Barrier (D2): {d2_t2} | Stake: {stake}")
+                        print(f"🎯 [DIGITDIFF] R_25 | Trend: DOWN | D3 is 2 | Barrier: 2 | Stake: {stake}")
                     except Exception as e:
                         print(f"❌ [ORDER ERROR] {e}")
 
