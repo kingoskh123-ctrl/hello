@@ -692,8 +692,8 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                             "duration": 1, 
                             "duration_unit": "t",
                             "symbol": "R_25",
-                            "contract_type": "DIGITOVER",
-                            "barrier": 1 # الرهان أن الرقم القادم أكبر من 1
+                            "contract_type": "DIGITUNDER",
+                            "barrier": 8 # الرهان أن الرقم القادم أكبر من 1
                         }
                     }
 
