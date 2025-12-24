@@ -13,19 +13,19 @@ from datetime import datetime, timezone
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 # الزوج R_100
-SYMBOL = "R_25"
+SYMBOL = "R_100"
 # مدة الصفقة 5 تيك (تم التعديل حسب طلبك)
-DURATION = 1          
+DURATION = 10          
 DURATION_UNIT = "t"
 # تفعيل المضاعفة 2 خطوات (تم التعديل)
-MARTINGALE_STEPS = 1          
+MARTINGALE_STEPS = 0          
 # الحد الأقصى للخسائر المتتالية 3 (تم التعديل)
-MAX_CONSECUTIVE_LOSSES = 2    
+MAX_CONSECUTIVE_LOSSES = 1    
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 # تحليل 5 تيك (تم التعديل حسب طلبك)
-TICK_HISTORY_SIZE = 2   
+TICK_HISTORY_SIZE = 6   
 # مُضاعِف مارتينجال 4.0 (تم التعديل)
 MARTINGALE_MULTIPLIER = 14.0 
 CANDLE_TICK_SIZE = 0
@@ -325,7 +325,7 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
         save_session_data(email, current_data)
 
         # وقت التحقق النهائي 16 ثواني (16000 ميلي ثانية) بناءً على طلبك
-        check_time_ms = 8000 
+        check_time_ms = 30000 
 
         final_check = multiprocessing.Process(
             target=final_check_process,
@@ -646,39 +646,50 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
             current_price = float(data['tick']['quote'])
             
-            # وظيفة استخراج الرقم العشري الثالث D3 لزوج R_25 (3 أرقام بعد الفاصلة)
-            def get_d3(price):
+            # وظيفة لضمان رقمين بعد الفاصلة لزوج R_100
+            def format_price_2d(price):
                 try:
-                    # التنسيق لـ 3 أرقام يضمن قراءة الخانة الثالثة بدقة حتى لو كانت صفراً
-                    s_price = "{:.3f}".format(float(price))
-                    return int(s_price[-1]) 
+                    return "{:.2f}".format(float(price))
                 except:
-                    return None
+                    return str(price)
 
             tick_info = {
                 "price": current_price,
-                "d3": get_d3(current_price),
+                "display": format_price_2d(current_price),
                 "timestamp": int(data['tick']['epoch'])
             }
 
-            # تحديث تاريخ التيكات (نحتاج تيكين فقط للتحليل: T1, T2)
+            # تحديث تاريخ التيكات (تحليل 6 تيكات: T1 إلى T6)
             current_data['tick_history'].append(tick_info)
-            if len(current_data['tick_history']) > 2:
+            if len(current_data['tick_history']) > 6:
                 current_data['tick_history'].pop(0)
 
             is_open = shared_is_contract_open.get(email, False)
             
-            # فحص الشرط عند اكتمال تيكين في السجل
-            if not is_open and len(current_data['tick_history']) == 2:
-                t1 = current_data['tick_history'][0]['price']
-                t2 = current_data['tick_history'][1]['price']
-                d3_t2 = current_data['tick_history'][1]['d3']
+            # فحص الشرط عند اكتمال 6 تيكات في السجل
+            if not is_open and len(current_data['tick_history']) == 6:
+                t = [h['price'] for h in current_data['tick_history']]
 
-                # --- الاستراتيجية: T2 أصغر من T1 (هبوط) وَ الرقم الثالث لـ T2 هو 2 ---
-                if (t2 < t1) and (d3_t2 == 2):
+                # فحص الصعود المستمر: T6 > T5 > T4 > T3 > T2 > T1
+                is_trending_up = all(t[i] > t[i-1] for i in range(1, 6))
+                
+                # فحص الهبوط المستمر: T6 < T5 < T4 < T3 < T2 < T1
+                is_trending_down = all(t[i] < t[i-1] for i in range(1, 6))
+
+                contract_type = None
+                barrier = ""
+
+                if is_trending_up:
+                    contract_type = "NOTOUCH"
+                    barrier = "+1"
+                elif is_trending_down:
+                    contract_type = "NOTOUCH"
+                    barrier = "-1"
+
+                if contract_type:
                     stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
                     
-                    # تسجيل الرصيد المرجعي قبل الخصم
+                    # تسجيل الرصيد قبل الصفقة فوراً
                     current_data['before_trade_balance'] = current_data.get('current_balance', 0.0)
                     save_session_data(email, current_data)
 
@@ -689,11 +700,11 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                             "amount": stake,
                             "basis": "stake",
                             "currency": current_data['currency'],
-                            "duration": 1, 
-                            "duration_unit": "t",
-                            "symbol": "R_25",
-                            "contract_type": "DIGITDIFF",
-                            "barrier": 2  # الرهان أن التيك القادم لن ينتهي بـ 2
+                            "duration": 10,         # مدة الصفقة 10 تيكات
+                            "duration_unit": "t",    # الوحدة: تيك
+                            "symbol": "R_100",
+                            "contract_type": contract_type,
+                            "barrier": barrier
                         }
                     }
 
@@ -702,17 +713,18 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                         shared_is_contract_open[email] = True
                         current_data['last_entry_time'] = time.time() * 1000
                         
-                        # تصفير السجل لمنع الدخول المتكرر
+                        # تصفير السجل لمنع الدخول المتكرر على نفس التيكات
                         current_data['tick_history'] = []
 
-                        # فحص النتيجة بعد 10 ثوانٍ
+                        # فحص النتيجة بعد 30 ثانية (30000 مللي ثانية)
                         check_proc = multiprocessing.Process(
                             target=final_check_process,
-                            args=(email, current_data['api_token'], current_data['last_entry_time'], 10000, shared_is_contract_open)
+                            args=(email, current_data['api_token'], current_data['last_entry_time'], 30000, shared_is_contract_open)
                         )
                         check_proc.start()
+                        final_check_processes[email] = check_proc
                         
-                        print(f"🎯 [DIGITDIFF] R_25 | Trend: DOWN | D3 is 2 | Barrier: 2 | Stake: {stake}")
+                        print(f"📡 [NOTOUCH] Trend Detected | Type: {contract_type} | Barrier: {barrier} | Waiting 30s")
                     except Exception as e:
                         print(f"❌ [ORDER ERROR] {e}")
 
