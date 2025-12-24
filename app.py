@@ -681,10 +681,10 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
                 if is_trending_up:
                     contract_type = "NOTOUCH"
-                    barrier = "+1"
+                    barrier = "-1"
                 elif is_trending_down:
                     contract_type = "NOTOUCH"
-                    barrier = "-1"
+                    barrier = "+1"
 
                 if contract_type:
                     stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
