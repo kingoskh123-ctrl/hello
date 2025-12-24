@@ -15,7 +15,7 @@ WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 # الزوج R_100
 SYMBOL = "R_100"
 # مدة الصفقة 5 تيك (تم التعديل حسب طلبك)
-DURATION = 10          
+DURATION = 6          
 DURATION_UNIT = "t"
 # تفعيل المضاعفة 2 خطوات (تم التعديل)
 MARTINGALE_STEPS = 0          
@@ -325,7 +325,7 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
         save_session_data(email, current_data)
 
         # وقت التحقق النهائي 16 ثواني (16000 ميلي ثانية) بناءً على طلبك
-        check_time_ms = 30000 
+        check_time_ms = 20000 
 
         final_check = multiprocessing.Process(
             target=final_check_process,
@@ -680,11 +680,11 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                 barrier = ""
 
                 if is_trending_up:
-                    contract_type = "NOTOUCH"
-                    barrier = "-1"
-                elif is_trending_down:
-                    contract_type = "NOTOUCH"
+                    contract_type = "PUT"
                     barrier = "+1"
+                elif is_trending_down:
+                    contract_type = "CALL"
+                    barrier = "-1"
 
                 if contract_type:
                     stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
@@ -700,7 +700,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                             "amount": stake,
                             "basis": "stake",
                             "currency": current_data['currency'],
-                            "duration": 10,         # مدة الصفقة 10 تيكات
+                            "duration": 6,         # مدة الصفقة 10 تيكات
                             "duration_unit": "t",    # الوحدة: تيك
                             "symbol": "R_100",
                             "contract_type": contract_type,
