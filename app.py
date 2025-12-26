@@ -689,7 +689,7 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                             "duration_unit": "t",
                             "symbol": "R_100",
                             "contract_type": "DIGITDIFF",
-                            "barrier": 2           # الحاجز هو الرقم 2
+                            "barrier": 3           # الحاجز هو الرقم 2
                         }
                     }
 
