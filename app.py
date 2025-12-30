@@ -16,18 +16,18 @@ WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
 SYMBOL = "R_100"
 # مدة الصفقة 5 تيك (تم التعديل حسب طلبك)
 DURATION = 1          
-DURATION_UNIT = "t"
+DURATION_UNIT = "m"
 # تفعيل المضاعفة 2 خطوات (تم التعديل)
-MARTINGALE_STEPS = 1          
+MARTINGALE_STEPS = 4          
 # الحد الأقصى للخسائر المتتالية 3 (تم التعديل)
-MAX_CONSECUTIVE_LOSSES = 2    
+MAX_CONSECUTIVE_LOSSES = 5    
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
 # تحليل 5 تيك (تم التعديل حسب طلبك)
-TICK_HISTORY_SIZE = 1   
+TICK_HISTORY_SIZE = 149   
 # مُضاعِف مارتينجال 4.0 (تم التعديل)
-MARTINGALE_MULTIPLIER = 14.0 
+MARTINGALE_MULTIPLIER = 2.2 
 CANDLE_TICK_SIZE = 0
 SYNC_SECONDS = []
 
@@ -325,7 +325,7 @@ def send_trade_orders(email, base_stake, currency_code, contract_type, label, ba
         save_session_data(email, current_data)
 
         # وقت التحقق النهائي 16 ثواني (16000 ميلي ثانية) بناءً على طلبك
-        check_time_ms = 8000 
+        check_time_ms = 70000 
 
         final_check = multiprocessing.Process(
             target=final_check_process,
@@ -641,79 +641,93 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             save_session_data(email, current_data)
 
         elif msg_type == 'tick':
-            if not current_data.get('is_balance_received'):
-                return
+    if not current_data.get('is_balance_received'):
+        return
 
-            current_price = float(data['tick']['quote'])
+    try:
+        # 1. استخراج الوقت الحالي
+        now = datetime.datetime.now()
+        minute = now.minute
+        second = now.second
+
+        # 2. الزناد (Trigger): الدقيقة 4 والثانية 58 من دورة الـ 5 دقائق
+        if (minute % 5 == 4) and (second == 58):
             
-            # وظيفة استخراج الرقم العشري الثاني D2 لزوج R_100 (رقمين بعد الفاصلة)
-            def get_d2(price):
-                try:
-                    s_price = "{:.2f}".format(float(price))
-                    return int(s_price[-1]) 
-                except:
-                    return None
-
-            d2_current = get_d2(current_price)
-
-            # التأكد من وجود عداد في بيانات الجلسة
-            if 'd2_counter' not in current_data:
-                current_data['d2_counter'] = 0
-
             is_open = shared_is_contract_open.get(email, False)
+            last_request_min = current_data.get('last_request_min', -1)
 
-            # --- المنطق: إذا ظهر الرقم 2 ولم تكن هناك صفقة مفتوحة حالياً ---
-            if not is_open and d2_current == 2:
-                current_data['d2_counter'] += 1
+            # التأكد من عدم وجود صفقة مفتوحة وعدم تكرار الطلب في نفس الدقيقة
+            if not is_open and last_request_min != minute:
+                current_data['last_request_min'] = minute
                 
-                # المرة الأولى: حالة انتظار (Pending)
-                if current_data['d2_counter'] == 1:
-                    print(f"🟡 [PENDING] ظهر الرقم 2 للمرة الأولى. بانتظار المرة الثانية للدخول...")
+                # طلب الـ 149 تيك
+                history_request = {
+                    "ticks_history": "R_100",
+                    "adjust_start_time": 1,
+                    "count": 149,
+                    "end": "latest",
+                    "style": "ticks"
+                }
                 
-                # المرة الثانية: دخول الصفقة (Trade)
-                elif current_data['d2_counter'] == 2:
-                    stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
-                    
-                    # تسجيل الرصيد المرجعي قبل الخصم
-                    current_data['before_trade_balance'] = current_data.get('current_balance', 0.0)
-                    save_session_data(email, current_data)
+                if email in active_ws:
+                    active_ws[email].send(json.dumps(history_request))
+                    print(f"📡 [SIGNAL] Time 4:58. Requesting 149 ticks history for {email}...")
 
-                    trade_request = {
-                        "buy": 1,
-                        "price": stake,
-                        "parameters": {
-                            "amount": stake,
-                            "basis": "stake",
-                            "currency": current_data['currency'],
-                            "duration": 1,          # مدة الصفقة 1 تيك كما طلبت
-                            "duration_unit": "t",
-                            "symbol": "R_100",
-                            "contract_type": "DIGITDIFF",
-                            "barrier": 3           # الحاجز هو الرقم 2
-                        }
-                    }
+        save_session_data(email, current_data)
 
-                    try:
-                        active_ws[email].send(json.dumps(trade_request))
-                        shared_is_contract_open[email] = True
-                        current_data['last_entry_time'] = time.time() * 1000
-                        
-                        # تصفير العداد فوراً لانتظار ظهور الرقم 2 مرتين جديدتين للصفقة القادمة
-                        current_data['d2_counter'] = 0
-                        
-                        # فحص النتيجة بعد 8 ثوانٍ (8000 مللي ثانية)
-                        check_proc = multiprocessing.Process(
-                            target=final_check_process,
-                            args=(email, current_data['api_token'], current_data['last_entry_time'], 8000, shared_is_contract_open)
-                        )
-                        check_proc.start()
-                        final_check_processes[email] = check_proc
-                        
-                        print(f"🎯 [DIGITDIFF] ظهر الرقم 2 للمرة الثانية! دخول صفقة 1-Tick | Barrier: 2 | فحص بعد 8ث")
-                    except Exception as e:
-                        print(f"❌ [ORDER ERROR] {e}")
+    except Exception as e:
+        print(f"❌ Error in tick logic: {e}")
 
-            save_session_data(email, current_data)
+# --- معالجة رد الـ History وتنفيذ الصفقة مع الانتظار ---
+elif msg_type == 'history':
+    try:
+        prices = data.get('history', {}).get('prices', [])
+        
+        if len(prices) >= 149:
+            first_tick = float(prices[0])   # أول تيك (الأقدم)
+            last_tick = float(prices[-1])   # آخر تيك (الحالي)
+
+            # تحديد الاتجاه
+            if last_tick > first_tick:
+                contract_type = "CALL"
+                label = "UP 📈"
+            else:
+                contract_type = "PUT"
+                label = "DOWN 📉"
+
+            # حساب مبلغ الصفقة (المارتينجال)
+            stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
+            
+            trade_params = {
+                "buy": 1,
+                "price": float(stake),
+                "parameters": {
+                    "amount": float(stake),
+                    "basis": "stake",
+                    "currency": current_data.get('currency', 'USD'),
+                    "duration": 1,
+                    "duration_unit": "m", # مدة الصفقة دقيقة
+                    "symbol": "R_100",
+                    "contract_type": contract_type
+                }
+            }
+            
+            if email in active_ws:
+                active_ws[email].send(json.dumps(trade_params))
+                shared_is_contract_open[email] = True
+                current_data['last_entry_time'] = time.time() * 1000
+                
+                print(f"🚀 [TRADE] {label} | First: {first_tick} | Last: {last_tick} | Stake: {stake}")
+
+                # --- إعادة دالة انتظار النتيجة (مهم جداً) ---
+                # ننتظر 65 ثانية (دقيقة مدة الصفقة + 5 ثواني احتياط)
+                multiprocessing.Process(
+                    target=final_check_process,
+                    args=(email, current_data['api_token'], current_data['last_entry_time'], 70000, shared_is_contract_open)
+                ).start()
+
+    except Exception as e:
+        print(f"❌ Error in history processing: {e}")
     def on_close_wrapper(ws_app, code, msg):
         print(f"❌ [WS Close {email}] Code: {code}, Message: {msg}")
         if email in active_ws:
