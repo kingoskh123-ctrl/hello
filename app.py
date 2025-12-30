@@ -641,41 +641,36 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
             save_session_data(email, current_data)
 
         elif msg_type == 'tick':
-        # يجب أن يكون هناك 4 مسافات على الأقل هنا ليكون السطر داخل الـ elif
-            if not current_data.get('is_balance_received'):
-                return
+        if not current_data.get('is_balance_received'):
+            pass # تغيير مؤقت لضمان عدم وجود فراغ
+        else:
+            try:
+                now = datetime.datetime.now()
+                minute = now.minute
+                second = now.second
 
-        try:
-            now = datetime.datetime.now()
-            minute = now.minute
-            second = now.second
+                # الزناد: الدقيقة 4 والثانية 58
+                if (minute % 5 == 4) and (second == 58):
+                    is_open = shared_is_contract_open.get(email, False)
+                    last_request_min = current_data.get('last_request_min', -1)
 
-            # الزناد: قبل نهاية شمعة الـ 5 دقائق بـ ثواني (عند الثانية 58)
-            if (minute % 5 == 4) and (second == 58):
-                is_open = shared_is_contract_open.get(email, False)
-                last_request_min = current_data.get('last_request_min', -1)
+                    if not is_open and last_request_min != minute:
+                        current_data['last_request_min'] = minute
+                        history_request = {
+                            "ticks_history": "R_100",
+                            "adjust_start_time": 1,
+                            "count": 149,
+                            "end": "latest",
+                            "style": "ticks"
+                        }
+                        if email in active_ws:
+                            active_ws[email].send(json.dumps(history_request))
+                            print(f"📡 Requesting 149 ticks at 4:58 for {email}")
 
-                if not is_open and last_request_min != minute:
-                    current_data['last_request_min'] = minute
-                    
-                    history_request = {
-                        "ticks_history": "R_100",
-                        "adjust_start_time": 1,
-                        "count": 149,
-                        "end": "latest",
-                        "style": "ticks"
-                    }
-                    
-                    if email in active_ws:
-                        active_ws[email].send(json.dumps(history_request))
-                        print(f"📡 Requesting history at 4:58 for {email}")
+                save_session_data(email, current_data)
+            except Exception as e:
+                print(f"❌ Error in tick logic: {e}")
 
-            save_session_data(email, current_data)
-
-        except Exception as e:
-            print(f"❌ Error in tick logic: {e}")
-
-    # تأكد أن 'elif' الخاصة بالـ history في نفس مستوى 'elif' الخاصة بالـ tick
     elif msg_type == 'history':
         try:
             prices = data.get('history', {}).get('prices', [])
@@ -705,13 +700,12 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
                     shared_is_contract_open[email] = True
                     current_data['last_entry_time'] = time.time() * 1000
                     
-                    # عملية انتظار النتيجة
+                    import multiprocessing
                     multiprocessing.Process(
                         target=final_check_process,
                         args=(email, current_data['api_token'], current_data['last_entry_time'], 70000, shared_is_contract_open)
                     ).start()
-                    print(f"🚀 Trade Sent: {contract_type}")
-
+                    print(f"🚀 Trade Executed: {contract_type}")
         except Exception as e:
             print(f"❌ Error in history processing: {e}")
     def on_close_wrapper(ws_app, code, msg):
