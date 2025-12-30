@@ -642,8 +642,8 @@ def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_
 
         elif msg_type == 'tick':
         # يجب أن يكون هناك 4 مسافات على الأقل هنا ليكون السطر داخل الـ elif
-        if not current_data.get('is_balance_received'):
-            return
+            if not current_data.get('is_balance_received'):
+                return
 
         try:
             now = datetime.datetime.now()
