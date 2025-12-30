@@ -12,26 +12,19 @@ from datetime import datetime, timezone
 # BOT CONSTANT SETTINGS (FINAL)
 # ==========================================================
 WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-# الزوج R_100
 SYMBOL = "R_100"
-# مدة الصفقة 5 تيك (تم التعديل حسب طلبك)
-DURATION = 1          
+DURATION = 1           
 DURATION_UNIT = "m"
-# تفعيل المضاعفة 2 خطوات (تم التعديل)
-MARTINGALE_STEPS = 4          
-# الحد الأقصى للخسائر المتتالية 3 (تم التعديل)
-MAX_CONSECUTIVE_LOSSES = 5    
+MARTINGALE_STEPS = 4           
+MAX_CONSECUTIVE_LOSSES = 5     
 RECONNECT_DELAY = 1
 USER_IDS_FILE = "user_ids.txt"
 ACTIVE_SESSIONS_FILE = "active_sessions.json"
-# تحليل 5 تيك (تم التعديل حسب طلبك)
 TICK_HISTORY_SIZE = 149   
-# مُضاعِف مارتينجال 4.0 (تم التعديل)
 MARTINGALE_MULTIPLIER = 2.2 
 CANDLE_TICK_SIZE = 0
 SYNC_SECONDS = []
 
-# نوع العقد: سيتم تحديده ديناميكياً CALL/PUT
 TRADE_CONFIGS = [
     {"type": "CALL", "barrier": -0.05, "label": "CALL_ENTRY"}, 
     {"type": "PUT", "barrier": +0.05, "label": "PUT_ENTRY"}, 
@@ -49,7 +42,7 @@ DEFAULT_SESSION_STATE = {
     "initial_starting_balance": 0.0, 
     "before_trade_balance": 0.0,
     "current_stake": 0.35,
-    "current_total_stake": 0.35 * 1, # صفقة واحدة
+    "current_total_stake": 0.35 * 1,
     "current_step": 0,
     "consecutive_losses": 0,
     "total_wins": 0,
@@ -75,487 +68,164 @@ DEFAULT_SESSION_STATE = {
     "last_trade_type": None
 }
 
-# المتغيرات العالمية لعملية Flask الرئيسية
 flask_local_processes = {}
 final_check_processes = {}
 active_ws = {}  
 is_contract_open = None  
-# ==========================================================
-
 
 # ----------------------------------------------------------
 # Persistent State Management Functions
 # ----------------------------------------------------------
 
 def get_file_lock(f):
-    try:
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX) 
-    except Exception:
-        pass
+    try: fcntl.flock(f.fileno(), fcntl.LOCK_EX) 
+    except Exception: pass
 
 def release_file_lock(f):
-    try:
-        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-    except Exception:
-        pass
+    try: fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+    except Exception: pass
 
 def load_persistent_sessions():
-    if not os.path.exists(ACTIVE_SESSIONS_FILE):
-        return {}
-
+    if not os.path.exists(ACTIVE_SESSIONS_FILE): return {}
     with open(ACTIVE_SESSIONS_FILE, 'r+') as f: 
         get_file_lock(f)
         f.seek(0)
         try:
             content = f.read()
-            if content:
-                data = json.loads(content)
-            else:
-                data = {}
-        except json.JSONDecodeError:
-            data = {}
+            data = json.loads(content) if content else {}
+        except json.JSONDecodeError: data = {}
         finally:
             release_file_lock(f)
             return data
 
 def save_session_data(email, session_data):
     all_sessions = load_persistent_sessions()
-    if not isinstance(session_data, dict):
-          print(f"❌ ERROR: Attempted to save non-dict data for {email}")
-          return
-
+    if not isinstance(session_data, dict): return
     all_sessions[email] = session_data
-
     with open(ACTIVE_SESSIONS_FILE, 'w') as f:
         get_file_lock(f)
-        try:
-            json.dump(all_sessions, f, indent=4)
-        except Exception as e:
-            print(f"❌ ERROR saving session data: {e}")
-        finally:
-            release_file_lock(f)
+        try: json.dump(all_sessions, f, indent=4)
+        except Exception as e: print(f"❌ ERROR saving session data: {e}")
+        finally: release_file_lock(f)
 
 def delete_session_data(email):
     all_sessions = load_persistent_sessions()
-    if email in all_sessions:
-        del all_sessions[email]
-
+    if email in all_sessions: del all_sessions[email]
     with open(ACTIVE_SESSIONS_FILE, 'w') as f:
         get_file_lock(f)
-        try:
-            json.dump(all_sessions, f, indent=4)
-        except Exception as e:
-            print(f"❌ ERROR deleting session data: {e}")
-        finally:
-            release_file_lock(f)
+        try: json.dump(all_sessions, f, indent=4)
+        except Exception as e: print(f"❌ ERROR deleting session data: {e}")
+        finally: release_file_lock(f)
 
 def get_session_data(email):
     all_sessions = load_persistent_sessions()
     if email in all_sessions:
         data = all_sessions[email]
         for key, default_val in DEFAULT_SESSION_STATE.items(): 
-            if key not in data:
-                data[key] = default_val
+            if key not in data: data[key] = default_val
         return data
-
     return DEFAULT_SESSION_STATE.copy() 
 
 def load_allowed_users():
     if not os.path.exists(USER_IDS_FILE):
-        with open(USER_IDS_FILE, 'w', encoding='utf-8') as f:
-            f.write("test@example.com\n")
+        with open(USER_IDS_FILE, 'w', encoding='utf-8') as f: f.write("test@example.com\n")
         return {"test@example.com"}
     try:
         with open(USER_IDS_FILE, 'r', encoding='utf-8') as f:
-            users = {line.strip().lower() for line in f if line.strip()}
-        return users
-    except Exception as e:
-        return set()
+            return {line.strip().lower() for line in f if line.strip()}
+    except Exception: return set()
 
 def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
-    global flask_local_processes
-    global final_check_processes
-    global is_contract_open 
-
+    global flask_local_processes, final_check_processes, is_contract_open 
     current_data = get_session_data(email)
     current_data["is_running"] = False
     current_data["stop_reason"] = stop_reason
-
-    if not clear_data:
-        current_data["open_contract_ids"] = []
-
+    if not clear_data: current_data["open_contract_ids"] = []
     save_session_data(email, current_data)
 
     if email in flask_local_processes:
         try:
-            process = flask_local_processes[email]
-            if process.is_alive():
-                process.terminate()
-                process.join(timeout=2)
+            p = flask_local_processes[email]
+            if p.is_alive(): p.terminate()
             del flask_local_processes[email]
-            print(f"🛑 [INFO] Main process for {email} forcefully terminated.")
-        except Exception as e:
-            print(f"❌ [ERROR] Could not terminate main process for {email}: {e}")
-
-    if email in final_check_processes:
-        try:
-            process = final_check_processes[email]
-            if process.is_alive():
-                process.terminate()
-                process.join(timeout=2)
-            del final_check_processes[email]
-            print(f"🛑 [INFO] Final check process for {email} forcefully terminated.")
-        except Exception as e:
-            print(f"❌ [ERROR] Could not terminate final check process for {email}: {e}")
+        except: pass
 
     if is_contract_open is not None and email in is_contract_open:
         is_contract_open[email] = False 
 
     if clear_data:
-        delete_session_data(email) 
-        print(f"🛑 [INFO] Bot for {email} stopped ({stop_reason}) and session data cleared from file.")
-
+        delete_session_data(email)
         temp_data = DEFAULT_SESSION_STATE.copy()
         temp_data["stop_reason"] = stop_reason
         save_session_data(email, temp_data)
-    else:
-        save_session_data(email, current_data)
-
+    else: save_session_data(email, current_data)
 
 # ==========================================================
 # TRADING BOT FUNCTIONS
 # ==========================================================
 
 def calculate_martingale_stake(base_stake, current_step):
-    """
-    يحسب قيمة الرهان للمضاعفة باستخدام x4.0.
-    """
-    if current_step == 0:
-        return base_stake
-
-    # استخدام Martingale Multiplier 4.0 
-    if current_step <= MARTINGALE_STEPS: 
-        # نبدأ الرهان من قاعدة الـ base_stake ثم نضاعف الناتج
-        stake = base_stake
-        for i in range(current_step):
-            stake = stake * MARTINGALE_MULTIPLIER
-        return stake
-    else:
-        return base_stake
-
-
-def send_trade_orders(email, base_stake, currency_code, contract_type, label, barrier, is_martingale=False, shared_is_contract_open=None):
-    global final_check_processes
-
-    if email not in active_ws or active_ws[email] is None: return
-    ws_app = active_ws[email]
-
-    current_data = get_session_data(email)
-    
-    # تعديل بسيط: قراءة الرصيد قبل الخصم فقط إذا كانت هذه بداية المجموعة (الصفقة الأولى)
-    is_already_open = shared_is_contract_open.get(email) if shared_is_contract_open is not None else False
-    if not is_already_open:
-        current_data['before_trade_balance'] = current_data['current_balance']
-
-    if current_data['before_trade_balance'] == 0.0:
-        print("⚠️ [STAKE WARNING] Before trade balance is 0.0. PNL calculation will rely heavily on the final balance check.")
-        pass
-
-    if is_martingale:
-        stake_per_contract = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
-    else:
-        stake_per_contract = current_data['base_stake']
-        
-    rounded_stake = round(stake_per_contract, 2)
-
-    current_data['current_stake'] = rounded_stake
-    current_data['current_total_stake'] = rounded_stake 
-    current_data['last_entry_price'] = current_data['last_tick_data']['price'] if current_data.get('last_tick_data') else 0.0
-    
-    entry_digits = get_target_digits(current_data['last_entry_price'])
-    # عرض D2 فقط لأغراض التتبع/العرض
-    current_data['last_entry_d2'] = entry_digits[1] if len(entry_digits) > 1 else 'N/A' 
-
-    current_data['open_contract_ids'] = []
-
-    entry_msg = f"MARTINGALE STEP {current_data['current_step']}" if is_martingale else "BASE SIGNAL"
-
-    barrier_display = barrier if barrier is not None else 'N/A'
-
-    print(f"\n💰 [TRADE START] Stake: {current_data['current_total_stake']:.2f} ({entry_msg}) | Contract: {contract_type} @ Barrier: {barrier_display}")
-
-    # بناء طلب التداول للصفقة الواحدة
-    # بناء طلب التداول الأساسي
-    trade_request = {
-        "buy": 1,
-        "price": rounded_stake,
-        "parameters": {
-            "amount": rounded_stake,
-            "basis": "stake",
-            "currency": currency_code,
-            "duration": DURATION,        
-            "duration_unit": DURATION_UNIT,
-            "symbol": SYMBOL,
-            "contract_type": contract_type,
-        }
-    }
-    
-    # --- التعديل هنا لضمان إرسال الإشارة الصحيحة ---
-    if barrier is not None:
-        # إذا كان الحاجز أكبر من 0، نضيف إشارة + يدوياً (مثل +0.6)
-        # إذا كان الحاجز أصغر من 0، الإشارة - موجودة أصلاً في الرقم (مثل -0.6)
-        barrier_prefix = "+" if float(barrier) > 0 else ""
-        trade_request["parameters"]["barrier"] = f"{barrier_prefix}{barrier}"
-
-
-    try:
-        ws_app.send(json.dumps(trade_request))
-        print(f"    [-- {label}] Sent {contract_type} @ {rounded_stake:.2f} {currency_code}")
-        current_data['last_trade_type'] = contract_type
-    except Exception as e:
-        print(f"❌ [TRADE ERROR] Could not send trade order for {label}: {e}")
-        pass
-
-    # تعديل: بدء الفحص فقط في الصفقة الثانية (عندما لا يكون shared_is_contract_open هو None)
-    if shared_is_contract_open is not None:
-        shared_is_contract_open[email] = True 
-        
-        current_data['last_entry_time'] = time.time() * 1000
-
-        save_session_data(email, current_data)
-
-        # وقت التحقق النهائي 16 ثواني (16000 ميلي ثانية) بناءً على طلبك
-        check_time_ms = 70000 
-
-        final_check = multiprocessing.Process(
-            target=final_check_process,
-            args=(email, current_data['api_token'], current_data['last_entry_time'], check_time_ms, shared_is_contract_open)
-        )
-        final_check.start()
-        final_check_processes[email] = final_check
-        print(f"✅ [TRADE START] Final check process started in background (Waiting {check_time_ms / 1000}s).")
-    else:
-        # حفظ البيانات للصفقة الأولى بدون بدء فحص
-        save_session_data(email, current_data)
-
+    if current_step == 0: return base_stake
+    stake = base_stake
+    for _ in range(current_step): stake *= MARTINGALE_MULTIPLIER
+    return round(stake, 2)
 
 def check_pnl_limits_by_balance(email, after_trade_balance):
-    global MARTINGALE_STEPS
-    global MAX_CONSECUTIVE_LOSSES
-
     current_data = get_session_data(email)
-
-    if not current_data.get('is_running') and current_data.get('stop_reason') != "Running":
-        print(f"⚠️ [PNL] Bot stopped. Ignoring check for {email}.")
-        return
-
+    if not current_data.get('is_running') and current_data.get('stop_reason') != "Running": return
     before_trade_balance = current_data.get('before_trade_balance', 0.0)
-    
-    # --- التعديل هنا: الرهان الآن هو قيمة الرهان الفردي فقط ---
     last_total_stake = current_data['current_stake']
-
-    if before_trade_balance > 0.0:
-        total_profit_loss = after_trade_balance - before_trade_balance
-        print(f"** [PNL Calc] After Balance: {after_trade_balance:.2f} - Before Balance: {before_trade_balance:.2f} = PL: {total_profit_loss:.2f}")
-    else:
-        print("⚠️ [PNL WARNING] Before trade balance is 0.0. Assuming loss equivalent to stake for safety.")
-        total_profit_loss = -last_total_stake
+    total_profit_loss = (after_trade_balance - before_trade_balance) if before_trade_balance > 0.0 else -last_total_stake
     
-    # التعادل (0) لا يسجل خسارة
     overall_loss = total_profit_loss < -0.01
-
     stop_triggered = False
-
     if not overall_loss:
-        # الربح أو التعادل
         current_data['total_wins'] += 1
         current_data['current_step'] = 0
         current_data['consecutive_losses'] = 0
         current_data['current_stake'] = current_data['base_stake']
-        # --- التعديل هنا: إرجاع إجمالي الرهان للقيمة الأساسية ---
-        current_data['current_total_stake'] = current_data['base_stake']
-        current_data['tick_history'] = []
-        current_data['last_trade_type'] = None
-
-        initial_balance = current_data.get('initial_starting_balance', after_trade_balance)
-        net_profit_display = after_trade_balance - initial_balance
-        
-        if net_profit_display >= current_data['tp_target']:
+        if (after_trade_balance - current_data.get('initial_starting_balance', after_trade_balance)) >= current_data['tp_target']:
             stop_triggered = "TP Reached"
-
     else:
-        # الخسارة
         current_data['total_losses'] += 1
         current_data['consecutive_losses'] += 1
-        current_data['last_trade_type'] = None
-
-        # 🛑 الإيقاف عند الخسارة المحددة
         if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES:
             stop_triggered = f"SL Reached ({MAX_CONSECUTIVE_LOSSES} Consecutive Loss)"
-
         else:
-            # 🔄 تحضير للخطوة التالية في المضاعفة
             current_data['current_step'] += 1
-            
-            # التحقق إذا كانت الخطوة لا تزال ضمن النطاق
-            if current_data['current_step'] <= MARTINGALE_STEPS:
-                new_stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
+            current_data['current_stake'] = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
 
-                current_data['current_stake'] = new_stake
-                # --- التعديل هنا: إجمالي الرهان هو الرهان الجديد للصفقة الواحدة ---
-                current_data['current_total_stake'] = new_stake
-                current_data['martingale_stake'] = new_stake
-
-                print(f"🚨 [MARTINGALE PENDING] Overall Loss Detected. Pending Step {current_data['current_step']} @ Total Stake: {current_data['current_total_stake']:.2f}. Restarting {TICK_HISTORY_SIZE}-tick analysis...")
-            
-            else:
-                # تجاوز Max Martingale Steps، إعادة الضبط
-                current_data['current_stake'] = current_data['base_stake']
-                current_data['current_total_stake'] = current_data['base_stake']
-                current_data['current_step'] = 0
-
-        current_data['tick_history'] = []
-
-    current_data['pending_delayed_entry'] = False
-    current_data['entry_t1_d2'] = None
-
+    current_data['tick_history'] = []
     save_session_data(email, current_data)
-
-    print(f"[LOG {email}] Last Total PL: {total_profit_loss:.2f}, Step: {current_data['current_step']}, Last Total Stake: {last_total_stake:.2f}")
-
-    if stop_triggered:
-        stop_bot(email, clear_data=True, stop_reason=stop_triggered)
-        return
-# ==========================================================
-# UTILITY FUNCTIONS FOR PRICE MOVEMENT ANALYSIS (2 DECIMALS)
-# ==========================================================
-
-def get_target_digits(price):
-    """
-    يستخرج الأرقام العشرية من سعر التيك، مع الاقتصار على 2 أرقام بعد الفاصلة.
-    يعيد قائمة [D1, D2]
-    """
-    try:
-        # تنسيق السعر لضمان وجود خانتين عشريتين (D1, D2)
-        formatted_price = "{:.2f}".format(float(price)) 
-
-        if '.' in formatted_price:
-            parts = formatted_price.split('.')
-            decimal_part = parts[1] 
-
-            # نأخذ D1 و D2 فقط
-            digits = [int(d) for d in decimal_part[:2] if d.isdigit()]
-            
-            # ضمان وجود 2 أرقام عشرية
-            while len(digits) < 2:
-                 digits.append(0)
-
-            return digits 
-
-        return [0, 0]
-
-    except Exception as e:
-        print(f"Error calculating target digits: {e}")
-        return [0, 0]
-
-# ----------------------------------------------------------
-# SYNC BALANCE RETRIEVAL 
-# ----------------------------------------------------------
-
-def get_initial_balance_sync(token):
-    global WSS_URL_UNIFIED
-    try:
-        ws = websocket.WebSocket()
-        ws.connect(WSS_URL_UNIFIED, timeout=5)
-
-        ws.send(json.dumps({"authorize": token}))
-        auth_response = json.loads(ws.recv())
-
-        if 'error' in auth_response:
-            ws.close()
-            return None, "Authorization Failed"
-
-        ws.send(json.dumps({"balance": 1, "subscribe": 1}))
-
-        balance_response = json.loads(ws.recv())
-        ws.close()
-
-        if balance_response.get('msg_type') == 'balance':
-            balance = balance_response.get('balance', {}).get('balance')
-            currency = balance_response.get('balance', {}).get('currency')
-            return float(balance), currency
-
-        return None, "Balance response invalid"
-
-    except Exception as e:
-        return None, f"Connection/Request Failed: {e}"
+    if stop_triggered: stop_bot(email, clear_data=True, stop_reason=stop_triggered)
 
 def get_balance_sync(token):
-    global WSS_URL_UNIFIED
     try:
         ws = websocket.WebSocket()
         ws.connect(WSS_URL_UNIFIED, timeout=5)
-
         ws.send(json.dumps({"authorize": token}))
-        auth_response = json.loads(ws.recv())
-
-        if 'error' in auth_response:
-            ws.close()
-            return None, "Authorization Failed"
-
+        auth = json.loads(ws.recv())
+        if 'error' in auth: return None, "Auth Failed"
         ws.send(json.dumps({"balance": 1}))
-
-        balance_response = json.loads(ws.recv())
+        resp = json.loads(ws.recv())
         ws.close()
-
-        if balance_response.get('msg_type') == 'balance':
-            balance = balance_response.get('balance', {}).get('balance')
-            return float(balance), None
-
-        return None, "Balance response invalid"
-
-    except Exception as e:
-        return None, f"Connection/Request Failed: {e}"
-
-# ==========================================================
-# عملية التحقق النهائي المنفصلة (Final Check) 
-# ==========================================================
+        if resp.get('msg_type') == 'balance':
+            return float(resp['balance']['balance']), resp['balance'].get('currency')
+        return None, "Invalid Balance Resp"
+    except Exception as e: return None, str(e)
 
 def final_check_process(email, token, start_time_ms, time_to_wait_ms, shared_is_contract_open):
-    global final_check_processes
-
-    time_since_start = (time.time() * 1000) - start_time_ms
-    sleep_time = max(0, (time_to_wait_ms - time_since_start) / 1000)
-
-    print(f"😴 [FINAL CHECK] Separate process sleeping for {sleep_time:.2f} seconds...")
-    time.sleep(sleep_time)
-
-    final_balance, error = get_balance_sync(token)
-
-    if final_balance is not None:
-        check_pnl_limits_by_balance(email, final_balance)
-
-        current_data = get_session_data(email)
-        current_data['current_balance'] = final_balance
-        current_data['before_trade_balance'] = final_balance
-        
-        save_session_data(email, current_data)
-        print(f"✅ [FINAL CHECK] Result confirmed. New Balance: {final_balance:.2f}.")
-
-    else:
-        print(f"❌ [FINAL CHECK] Failed to get final balance: {error}. Cannot calculate precise PNL for this trade.")
-
-    try:
-        if shared_is_contract_open is not None and email in shared_is_contract_open:
-            shared_is_contract_open[email] = False
-            print(f"✅ [FINAL CHECK] Contract status successfully reset to False for {email}.")
-    except Exception as reset_e:
-        print(f"❌ [FINAL CHECK ERROR] Failed to reset shared_is_contract_open: {reset_e}")
-
-    if email in final_check_processes:
-        del final_check_processes[email]
-        print(f"✅ [FINAL CHECK] Process finished.")
-
+    time_since = (time.time() * 1000) - start_time_ms
+    time.sleep(max(0, (time_to_wait_ms - time_since) / 1000))
+    bal, _ = get_balance_sync(token)
+    if bal is not None:
+        check_pnl_limits_by_balance(email, bal)
+        data = get_session_data(email)
+        data['current_balance'] = bal
+        data['before_trade_balance'] = bal
+        save_session_data(email, data)
+    if shared_is_contract_open is not None and email in shared_is_contract_open:
+        shared_is_contract_open[email] = False
 
 # ==========================================================
 # CORE BOT LOGIC 
@@ -563,194 +233,83 @@ def final_check_process(email, token, start_time_ms, time_to_wait_ms, shared_is_
 
 def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_is_contract_open):
     global active_ws
-    global WSS_URL_UNIFIED
-
     active_ws[email] = None
+    if shared_is_contract_open is not None: shared_is_contract_open[email] = False
 
-    if shared_is_contract_open is not None:
-        if email not in shared_is_contract_open:
-            shared_is_contract_open[email] = False
-        else:
-            shared_is_contract_open[email] = False
-
-    session_data = get_session_data(email)
-
-    try:
-        initial_balance, currency_returned = get_initial_balance_sync(token)
-
-        if initial_balance is not None:
-            session_data['current_balance'] = initial_balance
-            session_data['currency'] = currency_returned
-            session_data['is_balance_received'] = True
-            
-            session_data['initial_starting_balance'] = initial_balance 
-            session_data['before_trade_balance'] = initial_balance
-            save_session_data(email, session_data)
-
-            print(f"💰 [SYNC BALANCE] Initial balance retrieved: {initial_balance:.2f} {session_data['currency']}. Account type: {session_data['account_type'].upper()}")
-
-        else:
-            print(f"⚠️ [SYNC BALANCE] Could not retrieve initial balance. Currency: {session_data['currency']}")
-            stop_bot(email, clear_data=True, stop_reason="Balance Retrieval Failed")
-            return
-
-    except Exception as e:
-        print(f"❌ FATAL ERROR during sync balance retrieval: {e}")
-        stop_bot(email, clear_data=True, stop_reason="Balance Retrieval Failed")
+    bal, curr = get_balance_sync(token)
+    if bal is None:
+        stop_bot(email, stop_reason="Initial Balance Failed")
         return
 
-    session_data = get_session_data(email)
-
-    session_data.update({
-        "api_token": token, "base_stake": stake, "tp_target": tp,
-        "is_running": True,
-        "current_total_stake": session_data.get("current_total_stake", stake * 1),
-        "stop_reason": "Running",
-    })
-
-    save_session_data(email, session_data)
+    data = get_session_data(email)
+    data.update({"api_token": token, "base_stake": stake, "tp_target": tp, "is_running": True, 
+                 "current_balance": bal, "currency": curr, "initial_starting_balance": bal, 
+                 "before_trade_balance": bal, "is_balance_received": True, "stop_reason": "Running"})
+    save_session_data(email, data)
 
     def on_open_wrapper(ws):
-        current_data = get_session_data(email)
-        token = current_data.get('api_token')
-        asset = SYMBOL
-
         ws.send(json.dumps({"authorize": token}))
-        ws.send(json.dumps({"ticks": asset, "subscribe": 1}))
-        if not current_data.get('is_balance_received'):
-              ws.send(json.dumps({"balance": 1, "subscribe": 1}))
+        ws.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
 
     def on_message_wrapper(ws_app, message):
         data = json.loads(message)
         msg_type = data.get('msg_type')
-
         current_data = get_session_data(email)
-
         if not current_data.get('is_running'):
             ws_app.close()
             return
 
         if msg_type == 'balance':
-            current_balance = data['balance']['balance']
-            currency = data['balance']['currency']
-
-            current_data['current_balance'] = float(current_balance)
-            current_data['currency'] = currency
+            current_data['current_balance'] = float(data['balance']['balance'])
             current_data['is_balance_received'] = True
-
             save_session_data(email, current_data)
 
-    elif msg_type == 'tick':
-        if not current_data.get('is_balance_received'):
-            pass
-        else:
+        elif msg_type == 'tick':
+            if current_data.get('is_balance_received'):
+                now = datetime.now()
+                if (now.minute % 5 == 4) and (now.second == 58):
+                    if not shared_is_contract_open.get(email, False) and current_data.get('last_request_min') != now.minute:
+                        current_data['last_request_min'] = now.minute
+                        save_session_data(email, current_data)
+                        ws_app.send(json.dumps({"ticks_history": SYMBOL, "count": 149, "end": "latest", "style": "ticks"}))
+
+        elif msg_type == 'history':
             try:
-                now = datetime.datetime.now()
-                minute = now.minute
-                second = now.second
-
-                # الزناد: الدقيقة 4 والثانية 58 من كل دورة 5 دقائق
-                if (minute % 5 == 4) and (second == 58):
-                    is_open = shared_is_contract_open.get(email, False)
-                    last_request_min = current_data.get('last_request_min', -1)
-
-                    if not is_open and last_request_min != minute:
-                        current_data['last_request_min'] = minute
-                        history_request = {
-                            "ticks_history": "R_100",
-                            "adjust_start_time": 1,
-                            "count": 149,
-                            "end": "latest",
-                            "style": "ticks"
-                        }
-                        if email in active_ws:
-                            active_ws[email].send(json.dumps(history_request))
-                            print(f"📡 Requesting 149 ticks at 4:58 for {email}")
-
-                save_session_data(email, current_data)
-            except Exception as e:
-                print(f"❌ Error in tick logic: {e}")
-
-    elif msg_type == 'history':
-        try:
-            prices = data.get('history', {}).get('prices', [])
-            if len(prices) >= 149:
-                first_tick = float(prices[0])
-                last_tick = float(prices[-1])
-
-                # تحديد الاتجاه: دخول مع الاتجاه الحالي
-                contract_type = "CALL" if last_tick > first_tick else "PUT"
-                stake = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
-                
-                trade_params = {
-                    "buy": 1,
-                    "price": float(stake),
-                    "parameters": {
-                        "amount": float(stake),
-                        "basis": "stake",
-                        "currency": current_data.get('currency', 'USD'),
-                        "duration": 1,
-                        "duration_unit": "m",
-                        "symbol": "R_100",
-                        "contract_type": contract_type
+                prices = data.get('history', {}).get('prices', [])
+                if len(prices) >= 149:
+                    contract_type = "CALL" if float(prices[-1]) > float(prices[0]) else "PUT"
+                    stk = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
+                    trade = {
+                        "buy": 1, "price": stk,
+                        "parameters": {"amount": stk, "basis": "stake", "currency": current_data.get('currency', 'USD'),
+                                       "duration": 1, "duration_unit": "m", "symbol": SYMBOL, "contract_type": contract_type}
                     }
-                }
-                
-                if email in active_ws:
-                    active_ws[email].send(json.dumps(trade_params))
+                    ws_app.send(json.dumps(trade))
                     shared_is_contract_open[email] = True
+                    current_data['before_trade_balance'] = current_data['current_balance']
                     current_data['last_entry_time'] = time.time() * 1000
-                    
-                    # عملية انتظار النتيجة ومعالجة المارتينجال - المدة 70000 مللي ثانية
-                    import multiprocessing
-                    multiprocessing.Process(
-                        target=final_check_process,
-                        args=(email, current_data['api_token'], current_data['last_entry_time'], 70000, shared_is_contract_open)
-                    ).start()
-                    print(f"🚀 Trade Executed: {contract_type} (First: {first_tick}, Last: {last_tick})")
-        except Exception as e:
-            print(f"❌ Error in history processing: {e}")
+                    current_data['last_trade_type'] = contract_type
+                    save_session_data(email, current_data)
+                    multiprocessing.Process(target=final_check_process, 
+                                            args=(email, token, current_data['last_entry_time'], 70000, shared_is_contract_open)).start()
+            except Exception as e: print(f"❌ Error in history processing: {e}")
+
     def on_close_wrapper(ws_app, code, msg):
-        print(f"❌ [WS Close {email}] Code: {code}, Message: {msg}")
-        if email in active_ws:
-            active_ws[email] = None
+        if email in active_ws: active_ws[email] = None
 
     def on_ping_wrapper(ws, message):
-        if not get_session_data(email).get('is_running'):
-            ws.close()
+        if not get_session_data(email).get('is_running'): ws.close()
 
     while True:
-        current_data = get_session_data(email)
-
-        if not current_data.get('is_running'):
-            break
-
+        if not get_session_data(email).get('is_running'): break
         if active_ws.get(email) is None:
-            print(f"🔗 [PROCESS] Attempting to connect for {email} to {WSS_URL_UNIFIED}...")
-
             try:
-                ws = websocket.WebSocketApp(
-                    WSS_URL_UNIFIED, on_open=on_open_wrapper, on_message=on_message_wrapper,
-                    on_error=lambda ws, err: print(f"[WS Error {email}] {err}"),
-                    on_close=on_close_wrapper
-                )
+                ws = websocket.WebSocketApp(WSS_URL_UNIFIED, on_open=on_open_wrapper, on_message=on_message_wrapper, on_close=on_close_wrapper)
                 active_ws[email] = ws
                 ws.on_ping = on_ping_wrapper
                 ws.run_forever(ping_interval=20, ping_timeout=10)
-
-            except Exception as e:
-                print(f"❌ [ERROR] WebSocket failed for {email}: {e}")
-
-            if get_session_data(email).get('is_running') is False:
-                break
-
-            print(f"💤 [PROCESS] Waiting {RECONNECT_DELAY} seconds before retrying connection for {email}...")
-            time.sleep(RECONNECT_DELAY)
-        else:
-              time.sleep(0.5)
-
-
-    print(f"🛑 [PROCESS] Bot process ended for {email}.")
+            except: pass
+        time.sleep(RECONNECT_DELAY)
 
 # ==========================================================
 # FLASK APP SETUP AND ROUTES 
