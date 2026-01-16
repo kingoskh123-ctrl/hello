@@ -1,6 +1,5 @@
-flask
-requests
+pyTelegramBotAPI
 websocket-client
-numpy
-pandas
-gunicorn
+flask
+pymongo
+dnspython
