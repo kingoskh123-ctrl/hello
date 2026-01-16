@@ -1,753 +1,165 @@
-import time
-import json
-import websocket
-import multiprocessing
-import os
-import sys
-import fcntl
-from flask import Flask, request, render_template_string, redirect, url_for, session, flash
-from datetime import datetime, timezone
+import websocket, json, time, multiprocessing, os
+from flask import Flask
+import telebot
+from telebot import types
+from pymongo import MongoClient
 
-# ==========================================================
-# BOT CONSTANT SETTINGS (FINAL)
-# ==========================================================
-WSS_URL_UNIFIED = "wss://blue.derivws.com/websockets/v3?app_id=16929"
-SYMBOL = "R_100"
-DURATION = 1           
-DURATION_UNIT = "m"
-MARTINGALE_STEPS = 4           
-MAX_CONSECUTIVE_LOSSES = 5     
-RECONNECT_DELAY = 1
-USER_IDS_FILE = "user_ids.txt"
-ACTIVE_SESSIONS_FILE = "active_sessions.json"
-TICK_HISTORY_SIZE = 149   
-MARTINGALE_MULTIPLIER = 2.2 
-CANDLE_TICK_SIZE = 0
-SYNC_SECONDS = []
-
-TRADE_CONFIGS = [
-    {"type": "CALL", "barrier": -0.05, "label": "CALL_ENTRY"}, 
-    {"type": "PUT", "barrier": +0.05, "label": "PUT_ENTRY"}, 
-]
-
-# ==========================================================
-# BOT RUNTIME STATE
-# ==========================================================
-DEFAULT_SESSION_STATE = {
-    "api_token": "",
-    "base_stake": 0.35,
-    "tp_target": 10.0,
-    "current_profit": 0.0,
-    "current_balance": 0.0,
-    "initial_starting_balance": 0.0, 
-    "before_trade_balance": 0.0,
-    "current_stake": 0.35,
-    "current_total_stake": 0.35 * 1,
-    "current_step": 0,
-    "consecutive_losses": 0,
-    "total_wins": 0,
-    "total_losses": 0,
-    "is_running": False,
-    "account_type": "demo",
-    "currency": "USD",
-    "last_entry_time": 0.0,
-    "last_entry_d2": 'N/A',
-    "tick_history": [],
-    "last_tick_data": {},
-    "open_contract_ids": [],
-    "martingale_stake": 0.0,
-    "martingale_config": TRADE_CONFIGS,
-    "pending_martingale": False,
-    "is_balance_received": False,
-    "stop_reason": "Stopped",
-    "pending_delayed_entry": False,
-    "entry_t1_d2": None,
-    "display_t1_price": 0.0,
-    "display_t4_price": 0.0, 
-    "display_t3_price": 0.0,
-    "last_trade_type": None
-}
-
-flask_local_processes = {}
-final_check_processes = {}
-active_ws = {}  
-is_contract_open = None  
-
-# ----------------------------------------------------------
-# Persistent State Management Functions
-# ----------------------------------------------------------
-
-def get_file_lock(f):
-    try: fcntl.flock(f.fileno(), fcntl.LOCK_EX) 
-    except Exception: pass
-
-def release_file_lock(f):
-    try: fcntl.flock(f.fileno(), fcntl.LOCK_UN)
-    except Exception: pass
-
-def load_persistent_sessions():
-    if not os.path.exists(ACTIVE_SESSIONS_FILE): return {}
-    with open(ACTIVE_SESSIONS_FILE, 'r+') as f: 
-        get_file_lock(f)
-        f.seek(0)
-        try:
-            content = f.read()
-            data = json.loads(content) if content else {}
-        except json.JSONDecodeError: data = {}
-        finally:
-            release_file_lock(f)
-            return data
-
-def save_session_data(email, session_data):
-    all_sessions = load_persistent_sessions()
-    if not isinstance(session_data, dict): return
-    all_sessions[email] = session_data
-    with open(ACTIVE_SESSIONS_FILE, 'w') as f:
-        get_file_lock(f)
-        try: json.dump(all_sessions, f, indent=4)
-        except Exception as e: print(f"❌ ERROR saving session data: {e}")
-        finally: release_file_lock(f)
-
-def delete_session_data(email):
-    all_sessions = load_persistent_sessions()
-    if email in all_sessions: del all_sessions[email]
-    with open(ACTIVE_SESSIONS_FILE, 'w') as f:
-        get_file_lock(f)
-        try: json.dump(all_sessions, f, indent=4)
-        except Exception as e: print(f"❌ ERROR deleting session data: {e}")
-        finally: release_file_lock(f)
-
-def get_session_data(email):
-    all_sessions = load_persistent_sessions()
-    if email in all_sessions:
-        data = all_sessions[email]
-        for key, default_val in DEFAULT_SESSION_STATE.items(): 
-            if key not in data: data[key] = default_val
-        return data
-    return DEFAULT_SESSION_STATE.copy() 
-
-def load_allowed_users():
-    if not os.path.exists(USER_IDS_FILE):
-        with open(USER_IDS_FILE, 'w', encoding='utf-8') as f: f.write("test@example.com\n")
-        return {"test@example.com"}
-    try:
-        with open(USER_IDS_FILE, 'r', encoding='utf-8') as f:
-            return {line.strip().lower() for line in f if line.strip()}
-    except Exception: return set()
-
-def stop_bot(email, clear_data=True, stop_reason="Stopped Manually"):
-    global flask_local_processes, final_check_processes, is_contract_open 
-    current_data = get_session_data(email)
-    current_data["is_running"] = False
-    current_data["stop_reason"] = stop_reason
-    if not clear_data: current_data["open_contract_ids"] = []
-    save_session_data(email, current_data)
-
-    if email in flask_local_processes:
-        try:
-            p = flask_local_processes[email]
-            if p.is_alive(): p.terminate()
-            del flask_local_processes[email]
-        except: pass
-
-    if is_contract_open is not None and email in is_contract_open:
-        is_contract_open[email] = False 
-
-    if clear_data:
-        delete_session_data(email)
-        temp_data = DEFAULT_SESSION_STATE.copy()
-        temp_data["stop_reason"] = stop_reason
-        save_session_data(email, temp_data)
-    else: save_session_data(email, current_data)
-
-# ==========================================================
-# TRADING BOT FUNCTIONS
-# ==========================================================
-
-def calculate_martingale_stake(base_stake, current_step):
-    if current_step == 0: return base_stake
-    stake = base_stake
-    for _ in range(current_step): stake *= MARTINGALE_MULTIPLIER
-    return round(stake, 2)
-
-def check_pnl_limits_by_balance(email, after_trade_balance):
-    current_data = get_session_data(email)
-    if not current_data.get('is_running') and current_data.get('stop_reason') != "Running": return
-    before_trade_balance = current_data.get('before_trade_balance', 0.0)
-    last_total_stake = current_data['current_stake']
-    total_profit_loss = (after_trade_balance - before_trade_balance) if before_trade_balance > 0.0 else -last_total_stake
-    
-    overall_loss = total_profit_loss < -0.01
-    stop_triggered = False
-    if not overall_loss:
-        current_data['total_wins'] += 1
-        current_data['current_step'] = 0
-        current_data['consecutive_losses'] = 0
-        current_data['current_stake'] = current_data['base_stake']
-        if (after_trade_balance - current_data.get('initial_starting_balance', after_trade_balance)) >= current_data['tp_target']:
-            stop_triggered = "TP Reached"
-    else:
-        current_data['total_losses'] += 1
-        current_data['consecutive_losses'] += 1
-        if current_data['consecutive_losses'] >= MAX_CONSECUTIVE_LOSSES:
-            stop_triggered = f"SL Reached ({MAX_CONSECUTIVE_LOSSES} Consecutive Loss)"
-        else:
-            current_data['current_step'] += 1
-            current_data['current_stake'] = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
-
-    current_data['tick_history'] = []
-    save_session_data(email, current_data)
-    if stop_triggered: stop_bot(email, clear_data=True, stop_reason=stop_triggered)
-
-def get_balance_sync(token):
-    try:
-        ws = websocket.WebSocket()
-        ws.connect(WSS_URL_UNIFIED, timeout=5)
-        ws.send(json.dumps({"authorize": token}))
-        auth = json.loads(ws.recv())
-        if 'error' in auth: return None, "Auth Failed"
-        ws.send(json.dumps({"balance": 1}))
-        resp = json.loads(ws.recv())
-        ws.close()
-        if resp.get('msg_type') == 'balance':
-            return float(resp['balance']['balance']), resp['balance'].get('currency')
-        return None, "Invalid Balance Resp"
-    except Exception as e: return None, str(e)
-
-def final_check_process(email, token, start_time_ms, time_to_wait_ms, shared_is_contract_open):
-    time_since = (time.time() * 1000) - start_time_ms
-    time.sleep(max(0, (time_to_wait_ms - time_since) / 1000))
-    bal, _ = get_balance_sync(token)
-    if bal is not None:
-        check_pnl_limits_by_balance(email, bal)
-        data = get_session_data(email)
-        data['current_balance'] = bal
-        data['before_trade_balance'] = bal
-        save_session_data(email, data)
-    if shared_is_contract_open is not None and email in shared_is_contract_open:
-        shared_is_contract_open[email] = False
-
-# ==========================================================
-# CORE BOT LOGIC 
-# ==========================================================
-
-def bot_core_logic(email, token, stake, tp, account_type, currency_code, shared_is_contract_open):
-    global active_ws
-    active_ws[email] = None
-    if shared_is_contract_open is not None: shared_is_contract_open[email] = False
-
-    bal, curr = get_balance_sync(token)
-    if bal is None:
-        stop_bot(email, stop_reason="Initial Balance Failed")
-        return
-
-    data = get_session_data(email)
-    data.update({"api_token": token, "base_stake": stake, "tp_target": tp, "is_running": True, 
-                 "current_balance": bal, "currency": curr, "initial_starting_balance": bal, 
-                 "before_trade_balance": bal, "is_balance_received": True, "stop_reason": "Running"})
-    save_session_data(email, data)
-
-    def on_open_wrapper(ws):
-        ws.send(json.dumps({"authorize": token}))
-        ws.send(json.dumps({"ticks": SYMBOL, "subscribe": 1}))
-
-    def on_message_wrapper(ws_app, message):
-        data = json.loads(message)
-        msg_type = data.get('msg_type')
-        current_data = get_session_data(email)
-        if not current_data.get('is_running'):
-            ws_app.close()
-            return
-
-        if msg_type == 'balance':
-            current_data['current_balance'] = float(data['balance']['balance'])
-            current_data['is_balance_received'] = True
-            save_session_data(email, current_data)
-
-        elif msg_type == 'tick':
-            if current_data.get('is_balance_received'):
-                now = datetime.now()
-                if (now.minute % 5 == 4) and (now.second == 58):
-                    if not shared_is_contract_open.get(email, False) and current_data.get('last_request_min') != now.minute:
-                        current_data['last_request_min'] = now.minute
-                        save_session_data(email, current_data)
-                        ws_app.send(json.dumps({"ticks_history": SYMBOL, "count": 149, "end": "latest", "style": "ticks"}))
-
-        elif msg_type == 'history':
-            try:
-                prices = data.get('history', {}).get('prices', [])
-                if len(prices) >= 149:
-                    contract_type = "CALL" if float(prices[-1]) > float(prices[0]) else "PUT"
-                    stk = calculate_martingale_stake(current_data['base_stake'], current_data['current_step'])
-                    trade = {
-                        "buy": 1, "price": stk,
-                        "parameters": {"amount": stk, "basis": "stake", "currency": current_data.get('currency', 'USD'),
-                                       "duration": 1, "duration_unit": "m", "symbol": SYMBOL, "contract_type": contract_type}
-                    }
-                    ws_app.send(json.dumps(trade))
-                    shared_is_contract_open[email] = True
-                    current_data['before_trade_balance'] = current_data['current_balance']
-                    current_data['last_entry_time'] = time.time() * 1000
-                    current_data['last_trade_type'] = contract_type
-                    save_session_data(email, current_data)
-                    multiprocessing.Process(target=final_check_process, 
-                                            args=(email, token, current_data['last_entry_time'], 70000, shared_is_contract_open)).start()
-            except Exception as e: print(f"❌ Error in history processing: {e}")
-
-    def on_close_wrapper(ws_app, code, msg):
-        if email in active_ws: active_ws[email] = None
-
-    def on_ping_wrapper(ws, message):
-        if not get_session_data(email).get('is_running'): ws.close()
-
-    while True:
-        if not get_session_data(email).get('is_running'): break
-        if active_ws.get(email) is None:
-            try:
-                ws = websocket.WebSocketApp(WSS_URL_UNIFIED, on_open=on_open_wrapper, on_message=on_message_wrapper, on_close=on_close_wrapper)
-                active_ws[email] = ws
-                ws.on_ping = on_ping_wrapper
-                ws.run_forever(ping_interval=20, ping_timeout=10)
-            except: pass
-        time.sleep(RECONNECT_DELAY)
-
-# ==========================================================
-# FLASK APP SETUP AND ROUTES 
-# ==========================================================
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SESSION_SECRET_KEY', 'VERY_STRONG_SECRET_KEY_RENDER_BOT')
-app.config['SESSION_PERMANENT'] = False
 
+# --- الإعدادات (تم دمج بياناتك بنجاح) ---
+TOKEN = "8433565422:AAHnQqw_8S95uyc4lFYczQFfBTNVRD3juwE"
+MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
-LOGIN_FORM = """
-<!doctype html>
-<title>Login</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-    body { font-family: Arial, sans-serif; padding: 20px; max-width: 400px; margin: auto; }
-    h1 { color: #007bff; }
-    input[type="email"], input[type="submit"] {
-        width: 100%;
-        padding: 10px;
-        margin-top: 5px;
-        margin-bottom: 10px;
-        border: 1px solid #ccc;
-        border-radius: 4px;
-        box-sizing: border-box;
-    }
-    input[type="submit"] {
-        background-color: #007bff;
-        color: white;
-        cursor: pointer;
-        font-size: 1.1em;
-    }
-    .note { margin-top: 15px; padding: 10px; background-color: #f8f9fa; border-radius: 4px; }
-</style>
-<h1>Bot Login</h1>
+bot = telebot.TeleBot(TOKEN)
+db_client = MongoClient(MONGO_URI)
+db = db_client['trading_bot']
+sessions_col = db['active_sessions'] 
 
-{% with messages = get_flashed_messages(with_categories=true) %}
-    {% if messages %}
-        {% for category, message in messages %}
-            <p style="color:{{ 'green' if category == 'success' else ('blue' if category == 'info' else 'red') }};">{{ message }}</p>
-        {% endfor %}
-    {% endif %}
-{% endwith %}
+manager = multiprocessing.Manager()
+users_states = manager.dict()
 
-<form method="POST" action="{{ url_for('login_route') }}">
-    <label for="email">Email Address:</label><br>
-    <input type="email" id="email" name="email" required><br>
-    <input type="submit" value="Login">
-</form>
-<div class="note">
-    <p>💡 Note: This is a placeholder login. Only users listed in <code>user_ids.txt</code> can log in.</p>
-</div>
-"""
+# --- فحص الصلاحيات من الملف المحلي ---
+def is_authorized(email):
+    if not os.path.exists("user_ids.txt"):
+        return False
+    with open("user_ids.txt", "r") as f:
+        emails = [line.strip().lower() for line in f.readlines()]
+    return email.strip().lower() in emails
 
+# --- مزامنة الجلسة مع السحاب ---
+def sync_to_cloud(chat_id):
+    if chat_id in users_states:
+        data = dict(users_states[chat_id])
+        sessions_col.update_one({"chat_id": chat_id}, {"$set": data}, upsert=True)
 
-CONTROL_FORM = """
-<!doctype html>
-<title>Control Panel</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-    body {
-        font-family: Arial, sans-serif;
-        padding: 10px;
-        max-width: 600px;
-        margin: auto;
-        direction: ltr;
-        text-align: left;
-    }
-    h1 {
-        color: #007bff;
-        font-size: 1.8em;
-        border-bottom: 2px solid #eee;
-        padding-bottom: 10px;
-    }
-    .status-running {
-        color: green;
-        font-weight: bold;
-        font-size: 1.3em;
-    }
-    .status-stopped {
-        color: red;
-        font-weight: bold;
-        font-size: 1.3em;
-    }
-    input[type="text"], input[type="number"], select {
-        width: 98%;
-        padding: 10px;
-        margin-top: 5px;
-        margin-bottom: 10px;
-        border: 1px solid #ccc;
-        border-radius: 4px;
-        box-sizing: border-box;
-        text-align: left;
-    }
-    form button {
-        padding: 12px 20px;
-        border: none;
-        border-radius: 5px;
-        cursor: pointer;
-        font-size: 1.1em;
-        margin-top: 15px;
-        width: 100%;
-    }
-    .data-box {
-        background-color: #f8f9fa;
-        border: 1px solid #e9ecef;
-        padding: 15px;
-        border-radius: 5px;
-        margin-bottom: 15px;
-    }
-    .tick-box {
-        display: flex;
-        justify-content: space-around;
-        padding: 10px;
-        background-color: #e9f7ff;
-        border: 1px solid #007bff;
-        border-radius: 4px;
-        margin-bottom: 10px;
-        font-weight: bold;
-        font-size: 1.0em;
-    }
-    .current-digit {
-        color: #ff5733;
-        font-size: 1.2em;
-    }
-    .info-label {
-        font-weight: normal;
-        color: #555;
-        font-size: 0.9em;
-    }
-</style>
-<h1>Bot Control Panel | User: {{ email }}</h1>
-<hr>
+# --- محرك التحليل المركزي R_100 ---
+def global_analysis():
+    ws = None
+    while True:
+        try:
+            if ws is None: ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
+            ws.send(json.dumps({"ticks_history": "R_100", "count": 3, "end": "latest", "style": "ticks"}))
+            res = json.loads(ws.recv()).get("history", {}).get("prices", [])
+            if len(res) >= 3:
+                def d(p): return int("{:.2f}".format(p).split('.')[1][1])
+                t1, t2, t3 = d(res[0]), d(res[1]), d(res[2])
+                # نمط التحليل المطلوب
+                if (t1 == 9 and t2 == 8 and t3 == 9) or (t1 == 8 and t2 == 9 and t3 == 8):
+                    for cid in list(users_states.keys()):
+                        u = users_states[cid]
+                        if u.get("is_running") and not u.get("is_trading") and is_authorized(u.get("email")):
+                            multiprocessing.Process(target=execute_trade, args=(cid,)).start()
+            time.sleep(0.5)
+        except:
+            if ws: ws.close()
+            ws = None; time.sleep(2)
 
-{% with messages = get_flashed_messages(with_categories=true) %}
-    {% if messages %}
-        {% for category, message in messages %}
-            <p style="color:{{ 'green' if category == 'success' else ('blue' if category == 'info' else 'red') }};">{{ message }}</p>
-        {% endfor %}
-    {% endif %}
-{% endwith %}
-
-{% if session_data and session_data.stop_reason and session_data.stop_reason != "Running" and session_data.stop_reason != "Stopped Manually" %}
-    <p style="color:red; font-weight:bold;">Last Session Ended: {{ session_data.stop_reason }}</p>
-{% endif %}
-
-
-{% if session_data and session_data.is_running %}
-    {% set strategy = '5 Ticks Analysis (R_100) -> Entry: CALL/PUT (if Diff >= 0.4 or <= -0.4) | Barriers: ±0.6 | Martingale: ' + MARTINGALE_STEPS|string + ' Steps (x' + MARTINGALE_MULTIPLIER|string + ')' %}
-
-    <p class="status-running">✅ Bot is Running! (Auto-refreshing)</p>
-
-    {# عرض سعر T1 وسعر T5 (الأخير) والفرق بينهما #}
-    <div class="tick-box">
-        {# T1 Display #}
-        <div>
-            <span class="info-label">T1 Price (Start):</span> <b>{% if session_data.display_t1_price %}{{ "%0.2f"|format(session_data.display_t1_price) }}{% else %}N/A{% endif %}</b>
-        </div>
-        
-        {# T5 Display #}
-        <div>
-            <span class="info-label">T5 Price (Latest):</span> <b>{% if session_data.display_t4_price %}{{ "%0.2f"|format(session_data.display_t4_price) }}{% else %}N/A{% endif %}</b>
-        </div>
-
-        {# Difference Calculation #}
-        {% set current_diff = (session_data.display_t4_price - session_data.display_t1_price)|round(4) if session_data.display_t4_price and session_data.display_t1_price else 0.0 %}
-        <div>
-            <span class="info-label">Diff (T5-T1):</span>
-            <b class="current-digit" style="color: {% if current_diff >= 0.4 or current_diff <= -0.4 %}green{% else %}red{% endif %};">
-                {{ current_diff }}
-            </b>
-            <p style="font-weight: normal; font-size: 0.8em;">
-                Threshold: ±0.4
-            </p>
-        </div>
-    </div>
-
-    <div class="data-box">
-        <p>Asset: <b>{{ SYMBOL }}</b> | Account: <b>{{ session_data.account_type.upper() }}</b> | Duration: <b>{{ DURATION }} Ticks</b></p>
-
-        <p style="font-weight: bold; color: #17a2b8;">
-            Current Balance: <b>{{ session_data.currency }} {{ session_data.current_balance|round(2) }}</b>
-        </p>
-        <p style="font-weight: bold; color: #007bff;">
-            Balance BEFORE Trade: <b>{{ session_data.currency }} {{ session_data.before_trade_balance|round(2) }}</b>
-        </p>
-
-        {% set net_profit_display = (session_data.current_balance - session_data.initial_starting_balance) if session_data.current_balance and session_data.initial_starting_balance else 0.0 %}
-        <p style="font-weight: bold; color: {% if net_profit_display >= 0 %}green{% else %}red{% endif %};">
-            Net Profit: <b>{{ session_data.currency }} {{ net_profit_display|round(2) }}</b> (TP Target: {{ session_data.tp_target|round(2) }})
-        </p>
-
-        <p style="font-weight: bold; color: {% if is_contract_open.get(email) %}#007bff{% else %}#555{% endif %};">
-            Open Contract Status:
-            <b>
-            {% set is_open = is_contract_open.get(email) if is_contract_open is not none else false %}
-            {% if is_open %}
-                Waiting PNL (16s Delay) (Type: {{ session_data.last_trade_type if session_data.last_trade_type else 'N/A' }})
-            {% else %}
-                0 (Searching for Signal)
-            {% endif %}
-            </b>
-        </p>
-
-        <p style="font-weight: bold; color: {% if session_data.current_step > 0 %}#ff5733{% else %}#555{% endif %};">
-            Trade Status:
-            <b>
-                {% set is_open = is_contract_open.get(email) if is_contract_open is not none else false %}
-                {% if is_open %}
-                    Awaiting Result (Stake: {{ session_data.current_total_stake|round(2) }})
-                {% else %}
-                    {% if session_data.current_step > 0 %}
-                        MARTINGALE STEP {{ session_data.current_step }} @ Stake: {{ session_data.current_total_stake|round(2) }} (Analyzing 5 Ticks)
-                    {% else %}
-                        BASE STAKE @ Stake: {{ session_data.current_stake|round(2) }} (Analyzing 5 Ticks)
-                    {% endif %}
-                {% endif %}
-            </b>
-        </p>
-
-        <p>Current Stake: <b>{{ session_data.currency }} {{ session_data.current_stake|round(2) }}</b></p>
-        <p style="font-weight: bold; color: {% if session_data.consecutive_losses > 0 %}red{% else %}green{% endif %};">
-        Consecutive Losses: <b>{{ session_data.consecutive_losses }}</b> / {{ max_consecutive_losses }}
-        </p>
-        <p style="font-weight: bold; color: green;">Total Wins: {{ session_data.total_wins }} | Total Losses: {{ session_data.total_losses }}</p>
-        <p style="font-weight: bold; color: #007bff;">Current Strategy: {{ strategy }}</p>
-
-        {% if not session_data.is_balance_received %}
-            <p style="font-weight: bold; color: orange;">⏳ Waiting for Initial Balance Data from Server...</p>
-        {% endif %}
-    </div>
-
-    <form method="POST" action="{{ url_for('stop_route') }}">
-        <button type="submit" style="background-color: red; color: white;">🛑 Stop Bot</button>
-    </form>
-{% else %}
-    <p class="status-stopped">🛑 Bot is Stopped. Enter settings to start a new session.</p>
-
-    <form method="POST" action="{{ url_for('stop_route') }}">
-        <button type="submit" style="background-color: #ff5733; color: white;">🧹 Force Stop & Clear Session</button>
-        <input type="hidden" name="force_stop" value="true">
-    </form>
-    <hr>
-
-    <form method="POST" action="{{ url_for('start_bot') }}">
-
-        <label for="account_type">Account Type ({{ SYMBOL }}):</label><br>
-        <select id="account_type" name="account_type" required>
-            <option value="demo" {% if session_data.account_type == 'demo' %}selected{% endif %}>Demo (USD)</option>
-            <option value="live" {% if session_data.account_type == 'live' %}selected{% endif %}>Live (tUSDT)</option>
-        </select><br>
-
-        <label for="token">Deriv API Token:</label><br>
-        <input type="text" id="token" name="token" required value="{{ session_data.api_token if session_data and session_data.api_token else '' }}"><br>
-
-        <label for="stake">Base Stake (For {{ SYMBOL }} contract, {{ DURATION }} Ticks):</label><br>
-        <input type="number" id="stake" name="stake" value="{{ session_data.base_stake|round(2) if session_data and session_data.base_stake else 0.35 }}" step="0.01" min="0.35" required><br>
-
-        <label for="tp">TP Target (USD/tUSDT):</label><br>
-        <input type="number" id="tp" name="tp" value="{{ session_data.tp_target|round(2) if session_data and session_data.tp_target else 10.0 }}" step="0.01" required><br>
-
-        <button type="submit" style="background-color: green; color: white;">🚀 Start Bot</button>
-    </form>
-{% endif %}
-<hr>
-<a href="{{ url_for('logout') }}" style="display: block; text-align: center; margin-top: 15px; font-size: 1.1em;">Logout</a>
-
-<script>
-    var SYMBOL = "{{ SYMBOL }}";
-    var DURATION = {{ DURATION }};
-    var TICK_HISTORY_SIZE = {{ TICK_HISTORY_SIZE }};
-
-    function autoRefresh() {
-        var isRunning = {{ 'true' if session_data and session_data.is_running else 'false' }};
-
-        if (isRunning) {
-            var refreshInterval = 1000;
-
-            setTimeout(function() {
-                window.location.reload();
-            }, refreshInterval);
-        }
-    }
-
-    autoRefresh();
-</script>
-"""
-
-@app.before_request
-def check_auth():
-    if request.path not in [url_for('login_route'), url_for('static', filename='style.css')]:
-        if 'email' not in session:
-            flash("Login required.", 'info')
-            return redirect(url_for('login_route'))
-
-@app.route('/', methods=['GET', 'POST'])
-def control_panel():
-    if 'email' not in session:
-        return redirect(url_for('login_route'))
-
-    email = session['email']
-    session_data = get_session_data(email)
-
-    return render_template_string(CONTROL_FORM,
-        email=email,
-        session_data=session_data,
-        SYMBOL=SYMBOL,
-        DURATION=DURATION,
-        TICK_HISTORY_SIZE=TICK_HISTORY_SIZE,
-        max_martingale_step=MARTINGALE_STEPS,
-        martingale_multiplier=MARTINGALE_MULTIPLIER,
-        max_consecutive_losses=MAX_CONSECUTIVE_LOSSES,
-        is_contract_open=is_contract_open, 
-        TRADE_CONFIGS=TRADE_CONFIGS
-    )
-
-
-@app.route('/login', methods=['GET', 'POST'])
-def login_route():
-    if request.method == 'POST':
-        email = request.form.get('email', '').strip().lower()
-
-        ALLOWED_USERS = load_allowed_users()
-
-        if email in ALLOWED_USERS:
-            session['email'] = email
-            flash(f"Login successful. Welcome, {email}!", 'success')
-            return redirect(url_for('control_panel'))
-        else:
-            flash("Invalid email or unauthorized user.", 'error')
-            return render_template_string(LOGIN_FORM)
-
-    return render_template_string(LOGIN_FORM)
-
-@app.route('/logout', methods=['GET'])
-def logout():
-    email = session.pop('email', None)
-    if email:
-        pass
-    flash("You have been logged out.", 'info')
-    return redirect(url_for('login_route'))
-
-@app.route('/start_bot', methods=['POST'])
-def start_bot():
-    if 'email' not in session:
-        flash("Login required.", 'error')
-        return redirect(url_for('login_route'))
-
-    email = session['email']
-
-    if email in flask_local_processes and flask_local_processes[email].is_alive():
-        flash("Bot is already running!", 'info')
-        return redirect(url_for('control_panel'))
-
+def execute_trade(chat_id):
+    state = users_states[chat_id]
     try:
-        token = request.form['token'].strip()
-        stake = float(request.form['stake'])
-        tp = float(request.form['tp'])
-        account_type = request.form['account_type']
+        ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
+        ws.send(json.dumps({"authorize": state["api_token"]}))
+        ws.recv()
+        req = {"proposal": 1, "amount": state["current_stake"], "basis": "stake", 
+               "contract_type": "DIGITOVER", "barrier": "1", "currency": state["currency"], 
+               "duration": 1, "duration_unit": "t", "symbol": "R_100"}
+        ws.send(json.dumps(req))
+        prop = json.loads(ws.recv()).get("proposal")
+        if prop:
+            ws.send(json.dumps({"buy": prop["id"], "price": state["current_stake"]}))
+            buy_res = json.loads(ws.recv())
+            if "buy" in buy_res:
+                new_state = users_states[chat_id].copy()
+                new_state["is_trading"] = True
+                new_state["active_contract"] = buy_res["buy"]["contract_id"]
+                users_states[chat_id] = new_state
+                bot.send_message(chat_id, "🚀 **Pattern Matched!** Trade Sent (OVER 1)")
+                time.sleep(8)
+                check_result(chat_id)
+        ws.close()
+    except: pass
 
-        if not token or stake <= 0.0 or tp <= 0.0:
-            raise ValueError("Invalid input values.")
+def check_result(chat_id):
+    state = users_states[chat_id]
+    try:
+        ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
+        ws.send(json.dumps({"authorize": state["api_token"]})); ws.recv()
+        ws.send(json.dumps({"proposal_open_contract": 1, "contract_id": state["active_contract"]}))
+        res = json.loads(ws.recv()).get("proposal_open_contract", {})
+        ws.close()
+        if res.get("is_expired") == 1:
+            profit = float(res.get("profit", 0))
+            new_state = users_states[chat_id].copy()
+            new_state["is_trading"] = False
+            if profit > 0:
+                new_state["win_count"] += 1; new_state["current_stake"] = new_state["initial_stake"]; icon = "✅ WIN"
+            else:
+                new_state["loss_count"] += 1; new_state["current_stake"] *= 9; icon = "❌ LOSS"
+            new_state["total_profit"] += profit
+            users_states[chat_id] = new_state
+            sync_to_cloud(chat_id)
+            bot.send_message(chat_id, f"{icon} ({profit:.2f})\nProfit: {new_state['total_profit']:.2f}")
+    except: pass
 
-        currency = "USD" if account_type == 'demo' else "tUSDT"
+@bot.message_handler(commands=['start'])
+def start(m):
+    saved = sessions_col.find_one({"chat_id": m.chat.id})
+    if saved and is_authorized(saved['email']):
+        users_states[m.chat.id] = saved
+        bot.send_message(m.chat.id, f"Welcome back {saved['email']}!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
+    else:
+        bot.send_message(m.chat.id, "👋 Welcome! Enter your registered **Email**:")
+        bot.register_next_step_handler(m, login_process)
 
-        initial_data = DEFAULT_SESSION_STATE.copy()
-        initial_data.update({
-            "api_token": token,
-            "base_stake": stake,
-            "tp_target": tp,
-            "account_type": account_type,
-            "currency": currency,
-            "current_stake": stake,
-            "current_total_stake": stake * 1,
-            "is_running": False,
-            "stop_reason": "Starting..."
-        })
-        save_session_data(email, initial_data)
+def login_process(m):
+    email = m.text.strip().lower()
+    if is_authorized(email):
+        config = {"chat_id": m.chat.id, "email": email, "api_token": "", "initial_stake": 0.0,
+                  "current_stake": 0.0, "tp": 0.0, "currency": "USD", "is_running": False,
+                  "is_trading": False, "total_profit": 0.0, "win_count": 0, "loss_count": 0}
+        users_states[m.chat.id] = config
+        sync_to_cloud(m.chat.id)
+        bot.send_message(m.chat.id, "✅ Login Success!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
+    else:
+        bot.send_message(m.chat.id, "🚫 Email not authorized.")
 
-        if is_contract_open is None:
-              flash("Bot initialization failed (Shared state manager not ready). Please restart the service.", 'error')
-              return redirect(url_for('control_panel'))
-        
-        process = multiprocessing.Process(
-            target=bot_core_logic,
-            args=(email, token, stake, tp, account_type, currency, is_contract_open)
-        )
-        process.start()
-        flask_local_processes[email] = process
+@bot.message_handler(func=lambda m: m.text in ['Demo 🛠️', 'Live 💰'])
+def mode(m):
+    new_state = users_states[m.chat.id].copy()
+    new_state["currency"] = "USD" if "Demo" in m.text else "tUSDT"
+    users_states[m.chat.id] = new_state
+    bot.send_message(m.chat.id, "Enter API Token:")
+    bot.register_next_step_handler(m, save_token)
 
-        flash(f"Bot started successfully for {email} ({account_type.upper()}). Waiting for initial data...", 'success')
-    except Exception as e:
-        flash(f"Failed to start bot: {e}", 'error')
+def save_token(m):
+    new_state = users_states[m.chat.id].copy(); new_state["api_token"] = m.text.strip(); users_states[m.chat.id] = new_state
+    bot.send_message(m.chat.id, "Stake:"); bot.register_next_step_handler(m, save_stake)
 
-    return redirect(url_for('control_panel'))
+def save_stake(m):
+    try:
+        new_state = users_states[m.chat.id].copy(); val = float(m.text)
+        new_state["initial_stake"] = val; new_state["current_stake"] = val; users_states[m.chat.id] = new_state
+        bot.send_message(m.chat.id, "Target Profit:"); bot.register_next_step_handler(m, save_tp)
+    except: pass
 
-@app.route('/stop', methods=['POST'])
-def stop_route():
-    if 'email' not in session:
-        flash("Login required.", 'error')
-        return redirect(url_for('login_route'))
+def save_tp(m):
+    try:
+        new_state = users_states[m.chat.id].copy(); new_state["tp"] = float(m.text); new_state["is_running"] = True; users_states[m.chat.id] = new_state
+        sync_to_cloud(m.chat.id)
+        bot.send_message(m.chat.id, "🚀 Bot Running!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+    except: pass
 
-    email = session['email']
-    force_stop = request.form.get('force_stop') == 'true'
+@bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
+def stop_call(m):
+    new_state = users_states[m.chat.id].copy(); new_state["is_running"] = False; users_states[m.chat.id] = new_state
+    sync_to_cloud(m.chat.id)
+    bot.send_message(m.chat.id, "🛑 Bot Stopped.", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
 
-    clear_data_on_stop = force_stop
-
-    stop_bot(email, clear_data=clear_data_on_stop, stop_reason="Stopped Manually")
-
-    flash(f"Bot stopped and {'session cleared' if clear_data_on_stop else 'state saved'}.", 'info')
-    return redirect(url_for('control_panel'))
-
-# ==========================================================
-# Gunicorn/Local Execution Entry Point & Shared State Setup 
-# ==========================================================
-
-try:
-    manager = multiprocessing.Manager()
-    is_contract_open = manager.dict() 
-except Exception as e:
-    print(f"⚠️ [MANAGER INIT] Multiprocessing Manager failed to initialize: {e}. Defaulting shared state to None.")
-    is_contract_open = None
-
-# ----------------------------------------------------------
+@app.route('/')
+def home(): return "Bot is Alive"
 
 if __name__ == '__main__':
-    flask_local_processes = {}
-    final_check_processes = {}
-
-    for email in list(flask_local_processes.keys()):
-        if flask_local_processes[email].is_alive():
-            flask_local_processes[email].terminate()
-            flask_local_processes[email].join()
-            del flask_local_processes[email]
-
-    if not os.path.exists(ACTIVE_SESSIONS_FILE):
-        with open(ACTIVE_SESSIONS_FILE, 'w') as f:
-            f.write('{}')
-    if not os.path.exists(USER_IDS_FILE):
-        load_allowed_users()
-
-    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+    for doc in sessions_col.find(): users_states[doc['chat_id']] = doc
+    multiprocessing.Process(target=global_analysis, daemon=True).start()
+    multiprocessing.Process(target=lambda: app.run(host='0.0.0.0', port=10000), daemon=True).start()
+    bot.infinity_polling()
