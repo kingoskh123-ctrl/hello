@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# --- CONFIGURATION (NEW TOKEN) ---
-TOKEN = "8264292822:AAFdOPEWviRc0dgL75XVPOn9Zh4SSEMTRho"
+# --- CONFIGURATION (UPDATED TOKEN) ---
+TOKEN = "8433565422:AAGM4irBm9DMVAOEViRiHdxPjF3kW2ebtDY"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -28,13 +28,14 @@ def get_initial_state():
 
 state = manager.dict(get_initial_state())
 
-# --- AUTHORIZATION ---
+# --- AUTHORIZATION SYSTEM ---
 def is_authorized(email):
     email = email.strip().lower()
     if not os.path.exists("user_ids.txt"): return False
     with open("user_ids.txt", "r") as f:
         auth_emails = [line.strip().lower() for line in f.readlines()]
     if email not in auth_emails: return False
+    
     user_data = sessions_col.find_one({"email": email})
     if user_data and "expiry_date" in user_data:
         try:
@@ -46,10 +47,11 @@ def is_authorized(email):
 def reset_and_stop(state_proxy, text):
     if state_proxy["chat_id"]:
         try:
-            report = (f"🛑 **SESSION TERMINATED**\n━━━━━━━━━━━━━━\n"
+            report = (f"🛑 **SESSION TERMINATED**\n"
+                      f"━━━━━━━━━━━━━━\n"
                       f"✅ Wins: `{state_proxy['win_count']}` | ❌ Losses: `{state_proxy['loss_count']}`\n"
                       f"💰 Final Profit: **{state_proxy['total_profit']:.2f}**\n"
-                      f"📝 Reason: {text}\n━━━━━━━━━━━━━━")
+                      f"📝 Reason: {text}")
             bot.send_message(state_proxy["chat_id"], report, parse_mode="Markdown", reply_markup=types.ReplyKeyboardRemove())
         except: pass
     initial = get_initial_state()
@@ -78,14 +80,15 @@ def check_result(state_proxy):
             else:
                 state_proxy["loss_count"] += 1
                 state_proxy["consecutive_losses"] += 1
-                state_proxy["current_stake"] *= 19 # Martingale x19
+                state_proxy["current_stake"] *= 19 
                 icon = "❌ LOSS"
             
             state_proxy["total_profit"] += profit
             state_proxy["active_contract"] = None 
             state_proxy["is_trading"] = False
 
-            stats_msg = (f"{icon} (**{profit:.2f}**)\n━━━━━━━━━━━━━━\n"
+            stats_msg = (f"{icon} (**{profit:.2f}**)\n"
+                         f"━━━━━━━━━━━━━━\n"
                          f"✅ Wins: `{state_proxy['win_count']}` | ❌ Losses: `{state_proxy['loss_count']}`\n"
                          f"🔄 Consecutive Losses: `{state_proxy['consecutive_losses']}/2`\n"
                          f"💰 Net Profit: **{state_proxy['total_profit']:.2f}**")
@@ -97,7 +100,7 @@ def check_result(state_proxy):
                 reset_and_stop(state_proxy, "Target Profit Reached!")
     except: pass
 
-# --- CORE ENGINE (STRICT TWO CANDLES ANALYSIS) ---
+# --- CORE ENGINE (10-TICK DOUBLE CANDLE) ---
 def main_loop(state_proxy):
     ws_persistent = None
     while True:
@@ -109,120 +112,101 @@ def main_loop(state_proxy):
                     ws_persistent.recv()
                 
                 ws_persistent.send(json.dumps({"ticks_history": "R_100", "count": 10, "end": "latest", "style": "ticks"}))
-                response = json.loads(ws_persistent.recv())
-                prices = response.get("history", {}).get("prices", [])
+                prices = json.loads(ws_persistent.recv()).get("history", {}).get("prices", [])
                 
                 if len(prices) >= 10:
-                    # Candle 1 (Ticks 1 to 5)
                     c1_diff = prices[4] - prices[0]
-                    # Candle 2 (Ticks 6 to 10)
                     c2_diff = prices[9] - prices[5]
                     
-                    current_signal = None
-                    barrier = ""
+                    sig = None
+                    if c1_diff >= 0.6 and c2_diff >= 0.6: sig = "CALL"
+                    elif c1_diff <= -0.6 and c2_diff <= -0.6: sig = "PUT"
 
-                    # التحقق من الشرط: الشمعتين بنفس الاتجاه وكل واحدة >= 0.6
-                    if c1_diff >= 0.6 and c2_diff >= 0.6:
-                        current_signal = "CALL"
-                        barrier = "-0.8"
-                    elif c1_diff <= -0.6 and c2_diff <= -0.6:
-                        current_signal = "PUT"
-                        barrier = "+0.8"
-
-                    if current_signal:
+                    if sig:
                         if not is_authorized(state_proxy["email"]):
-                            reset_and_stop(state_proxy, "Access Expired.")
+                            reset_and_stop(state_proxy, "Auth Expired.")
                             continue
                         
-                        bot.send_message(state_proxy["chat_id"], f"🎯 Signal Found: {current_signal}\nC1 Diff: {c1_diff:.3f}\nC2 Diff: {c2_diff:.3f}")
+                        bot.send_message(state_proxy["chat_id"], f"🎯 Signal: {sig}\nC1: {c1_diff:.2f} | C2: {c2_diff:.2f}")
 
                         req = {"proposal": 1, "amount": state_proxy["current_stake"], "basis": "stake", 
-                               "contract_type": current_signal, "barrier": barrier, "currency": state_proxy["currency"], 
-                               "duration": 5, "duration_unit": "t", "symbol": "R_100"}
+                               "contract_type": sig, "barrier": "-0.8" if sig=="CALL" else "+0.8", 
+                               "currency": state_proxy["currency"], "duration": 5, "duration_unit": "t", "symbol": "R_100"}
                         ws_persistent.send(json.dumps(req))
                         res_p = json.loads(ws_persistent.recv()).get("proposal")
-                        
                         if res_p:
                             ws_persistent.send(json.dumps({"buy": res_p["id"], "price": state_proxy["current_stake"]}))
-                            res_b = json.loads(ws_persistent.recv())
-                            if "buy" in res_b:
-                                state_proxy["active_contract"] = res_b["buy"]["contract_id"]
+                            if "buy" in json.loads(ws_persistent.recv()):
+                                state_proxy["active_contract"] = res_p["id"]
                                 state_proxy["start_time"] = time.time()
                                 state_proxy["is_trading"] = True
-                                ws_persistent.close(); ws_persistent = None
             elif state_proxy["is_trading"]:
                 check_result(state_proxy)
             time.sleep(1)
-        except:
-            if ws_persistent: ws_persistent.close()
-            ws_persistent = None; time.sleep(1)
+        except: time.sleep(1)
 
-# --- FLASK ADMIN PANEL (HTML) ---
+# --- ADMIN PANEL HTML ---
 @app.route('/')
 def home():
     emails = []
     if os.path.exists("user_ids.txt"):
-        with open("user_ids.txt", "r") as f:
-            emails = [line.strip() for line in f.readlines() if line.strip()]
-    
+        with open("user_ids.txt", "r") as f: emails = [l.strip() for l in f.readlines() if l.strip()]
     html = """
-    <!DOCTYPE html><html><head><title>Bot Admin</title><style>
+    <!DOCTYPE html><html><head><title>Admin Panel</title><style>
     body{font-family:sans-serif;text-align:center;background:#f4f7f6;padding:20px;}
     .card{background:white;width:90%;max-width:800px;margin:auto;padding:25px;border-radius:12px;box-shadow:0 4px 10px rgba(0,0,0,0.1);}
     table{width:100%;border-collapse:collapse;margin-top:20px;}th,td{padding:12px;border:1px solid #ddd;}
     th{background:#333;color:white;}.btn{padding:8px 15px;border:none;border-radius:5px;color:white;cursor:pointer;}
     .btn-add{background:#28a745;}.btn-del{background:#dc3545;}
-    </style></head><body><div class="card"><h2>User Management Panel</h2>
-    <form method="POST" action="/add_user"><input type="email" name="email" placeholder="New User Email" required style="padding:8px;width:250px;">
-    <button type="submit" class="btn btn-add">Add User</button></form><table><tr><th>Email</th><th>Activate Access</th><th>Action</th></tr>
-    {% for email in emails %}<tr><td>{{ email }}</td><td>
-    <form method="POST" action="/update_expiry" style="display:inline;">
-    <input type="hidden" name="email" value="{{ email }}"><select name="duration" style="padding:5px;">
-    <option value="1">1 Day</option><option value="30">30 Days</option><option value="36500">Lifetime</option></select>
-    <button type="submit" class="btn btn-add">Activate</button></form></td><td>
-    <form method="POST" action="/delete_user" style="display:inline;"><input type="hidden" name="email" value="{{ email }}">
-    <button type="submit" class="btn btn-del" onclick="return confirm('Revoke access?')">Revoke</button></form></td></tr>{% endfor %}
+    </style></head><body><div class="card"><h2>Admin Management</h2>
+    <form method="POST" action="/add_user"><input type="email" name="email" placeholder="New Email" required style="padding:8px;width:200px;">
+    <button type="submit" class="btn btn-add">Add User</button></form><table><tr><th>Email</th><th>Expiry</th><th>Action</th></tr>
+    {% for e in emails %}<tr><td>{{e}}</td><td><form method="POST" action="/update_expiry">
+    <input type="hidden" name="email" value="{{e}}"><select name="duration"><option value="1">1 Day</option><option value="30">30 Days</option><option value="36500">Life</option></select>
+    <button type="submit" class="btn btn-add">Set</button></form></td><td><form method="POST" action="/delete_user"><input type="hidden" name="email" value="{{e}}">
+    <button type="submit" class="btn btn-del" onclick="return confirm('Revoke Access?')">Revoke</button></form></td></tr>{% endfor %}
     </table></div></body></html>"""
     return render_template_string(html, emails=emails)
 
 @app.route('/add_user', methods=['POST'])
 def add_user():
-    email = request.form.get('email').strip().lower()
-    if email:
-        with open("user_ids.txt", "a") as f: f.write(email + "\n")
+    e = request.form.get('email').strip().lower()
+    if e:
+        with open("user_ids.txt", "a") as f: f.write(e + "\n")
     return redirect('/')
 
 @app.route('/update_expiry', methods=['POST'])
 def update_expiry():
-    email = request.form.get('email').lower()
-    days = int(request.form.get('duration'))
-    expiry = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d %H:%M")
-    sessions_col.update_one({"email": email}, {"$set": {"expiry_date": expiry}}, upsert=True)
+    e, d = request.form.get('email').lower(), int(request.form.get('duration'))
+    exp = (datetime.now() + timedelta(days=d)).strftime("%Y-%m-%d %H:%M")
+    sessions_col.update_one({"email": e}, {"$set": {"expiry_date": exp}}, upsert=True)
     return redirect('/')
 
 @app.route('/delete_user', methods=['POST'])
 def delete_user():
-    email_to_del = request.form.get('email').lower()
+    e = request.form.get('email').lower()
     if os.path.exists("user_ids.txt"):
         with open("user_ids.txt", "r") as f: lines = f.readlines()
         with open("user_ids.txt", "w") as f:
-            for line in lines:
-                if line.strip().lower() != email_to_del: f.write(line)
-    sessions_col.delete_one({"email": email_to_del})
+            for l in lines:
+                if l.strip().lower() != e: f.write(l)
+    sessions_col.delete_one({"email": e})
     return redirect('/')
 
 # --- BOT HANDLERS ---
 @bot.message_handler(commands=['start'])
 def welcome(m):
-    bot.send_message(m.chat.id, "👋 Welcome! Enter your registered email:")
+    bot.send_message(m.chat.id, "👋 Enter Registered Email:")
     bot.register_next_step_handler(m, login)
 
 def login(m):
-    email = m.text.strip().lower()
-    if is_authorized(email):
-        state["email"] = email; state["chat_id"] = m.chat.id
-        bot.send_message(m.chat.id, "✅ Access Granted!", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰'))
-    else: bot.send_message(m.chat.id, "🚫 No Access Found.")
+    e = m.text.strip().lower()
+    if is_authorized(e):
+        state["email"] = e; state["chat_id"] = m.chat.id
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add('Demo 🛠️', 'Live 💰')
+        bot.send_message(m.chat.id, "✅ Access Granted!", reply_markup=markup)
+    else: bot.send_message(m.chat.id, "🚫 No Access.")
 
 @bot.message_handler(func=lambda m: m.text in ['Demo 🛠️', 'Live 💰'])
 def ask_token(m):
@@ -232,12 +216,12 @@ def ask_token(m):
 
 def save_token(m):
     state["api_token"] = m.text.strip()
-    bot.send_message(m.chat.id, "Stake Amount:")
+    bot.send_message(m.chat.id, "Stake:")
     bot.register_next_step_handler(m, save_stake)
 
 def save_stake(m):
     try:
-        val = float(m.text); state["initial_stake"] = val; state["current_stake"] = val
+        v = float(m.text); state["initial_stake"] = v; state["current_stake"] = v
         bot.send_message(m.chat.id, "Target Profit:")
         bot.register_next_step_handler(m, save_tp)
     except: pass
@@ -245,11 +229,15 @@ def save_stake(m):
 def save_tp(m):
     try:
         state["tp"] = float(m.text); state["is_running"] = True
-        bot.send_message(m.chat.id, "🚀 Running 10-Tick Strategy...", reply_markup=types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑'))
+        markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
+        markup.add(types.KeyboardButton('STOP 🛑'))
+        bot.send_message(m.chat.id, "🚀 Running Double-Candle Strategy...", reply_markup=markup)
     except: pass
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
-def stop_all(m): reset_and_stop(state, "Manual Stop.")
+@bot.message_handler(commands=['stop'])
+def stop_all(m):
+    reset_and_stop(state, "Manual Stop.")
 
 if __name__ == '__main__':
     multiprocessing.Process(target=main_loop, args=(state,), daemon=True).start()
