@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# --- CONFIGURATION (UPDATED TOKEN) ---
-TOKEN = "8433565422:AAEkiO41a7Ifljn5KYyYNJYcNxT9etbm50c"
+# --- CONFIGURATION ---
+TOKEN = "8433565422:AAFSk6WKbN9UgZx3-a6brmcM3jlBpsL2HvM"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -29,7 +29,7 @@ def get_initial_state():
 
 state = manager.dict(get_initial_state())
 
-# --- AUTHORIZATION SYSTEM ---
+# --- AUTHORIZATION ---
 def is_authorized(email):
     email = email.strip().lower()
     if not os.path.exists("user_ids.txt"): return False
@@ -57,7 +57,7 @@ def reset_and_stop(state_proxy, text):
     initial = get_initial_state()
     for k, v in initial.items(): state_proxy[k] = v
 
-# --- RESULT CHECK (18s DELAY) ---
+# --- RESULT CHECK (18s) ---
 def check_result(state_proxy):
     if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 18:
         return
@@ -100,7 +100,7 @@ def check_result(state_proxy):
                 reset_and_stop(state_proxy, "Target Profit Reached!")
     except: pass
 
-# --- STRATEGY ENGINE ---
+# --- MAIN LOOP ---
 def main_loop(state_proxy):
     ws_persistent = None
     while True:
@@ -128,7 +128,6 @@ def main_loop(state_proxy):
 
                     if sig:
                         state_proxy["last_processed_tick"] = current_close
-                        
                         req = {"proposal": 1, "amount": state_proxy["current_stake"], "basis": "stake", 
                                "contract_type": sig, "barrier": "-0.8" if sig=="CALL" else "+0.8", 
                                "currency": state_proxy["currency"], "duration": 5, "duration_unit": "t", "symbol": "R_100"}
@@ -141,14 +140,14 @@ def main_loop(state_proxy):
                             ws_persistent.send(json.dumps({"buy": res_p["id"], "price": state_proxy["current_stake"]}))
                             buy_data = json.loads(ws_persistent.recv())
                             if "buy" in buy_data:
-                                bot.send_message(state_proxy["chat_id"], f"🎯 **Signal Found:** {sig}\nStake: {state_proxy['current_stake']} {state_proxy['currency']}")
+                                bot.send_message(state_proxy["chat_id"], f"🎯 **Signal:** {sig}\nStake: {state_proxy['current_stake']} {state_proxy['currency']}")
                                 state_proxy["active_contract"] = buy_data["buy"]["contract_id"]
                                 state_proxy["start_time"] = time.time()
                                 state_proxy["is_trading"] = True
                                 ws_persistent.close(); ws_persistent = None
                             else:
-                                err = buy_data.get("error", {}).get("message", "Unknown Error")
-                                bot.send_message(state_proxy["chat_id"], f"⚠️ Trade Failed: {err}")
+                                err = buy_data.get("error", {}).get("message", "Trade Error")
+                                bot.send_message(state_proxy["chat_id"], f"⚠️ Failed: {err}")
             elif state_proxy["is_trading"]:
                 check_result(state_proxy)
             time.sleep(1)
@@ -156,7 +155,58 @@ def main_loop(state_proxy):
             if ws_persistent: ws_persistent.close()
             ws_persistent = None; time.sleep(1)
 
-# --- BOT INTERFACE (ENGLISH) ---
+# --- ADMIN PANEL (HTML) ---
+@app.route('/')
+def home():
+    emails = []
+    if os.path.exists("user_ids.txt"):
+        with open("user_ids.txt", "r") as f: emails = [l.strip() for l in f.readlines() if l.strip()]
+    
+    html = """
+    <!DOCTYPE html><html><head><title>Admin Panel</title>
+    <style>
+        body{font-family:sans-serif;text-align:center;background:#f4f7f6;padding:20px;}
+        .card{background:white;width:90%;max-width:800px;margin:auto;padding:25px;border-radius:12px;box-shadow:0 4px 10px rgba(0,0,0,0.1);}
+        table{width:100%;border-collapse:collapse;margin-top:20px;}th,td{padding:12px;border:1px solid #ddd;}
+        th{background:#333;color:white;}.btn{padding:8px 15px;border:none;border-radius:5px;color:white;cursor:pointer;}
+        .btn-add{background:#28a745;}.btn-del{background:#dc3545;}
+        input, select{padding:8px;margin:5px;}
+    </style></head><body><div class="card"><h2>User Management Panel</h2>
+    <form method="POST" action="/add_user"><input type="email" name="email" placeholder="Email" required><button type="submit" class="btn btn-add">Add User</button></form>
+    <table><tr><th>Email</th><th>Set Expiry</th><th>Actions</th></tr>
+    {% for e in emails %}<tr><td>{{e}}</td><td><form method="POST" action="/update_expiry">
+    <input type="hidden" name="email" value="{{e}}"><select name="duration"><option value="1">1 Day</option><option value="30">30 Days</option><option value="36500">Lifetime</option></select>
+    <button type="submit" class="btn btn-add">Update</button></form></td><td><form method="POST" action="/delete_user"><input type="hidden" name="email" value="{{e}}">
+    <button type="submit" class="btn btn-del">Delete</button></form></td></tr>{% endfor %}
+    </table></div></body></html>"""
+    return render_template_string(html, emails=emails)
+
+@app.route('/add_user', methods=['POST'])
+def add_user():
+    e = request.form.get('email').strip().lower()
+    if e:
+        with open("user_ids.txt", "a") as f: f.write(e + "\n")
+    return redirect('/')
+
+@app.route('/update_expiry', methods=['POST'])
+def update_expiry():
+    e, d = request.form.get('email').lower(), int(request.form.get('duration'))
+    exp = (datetime.now() + timedelta(days=d)).strftime("%Y-%m-%d %H:%M")
+    users_col.update_one({"email": e}, {"$set": {"expiry_date": exp}}, upsert=True)
+    return redirect('/')
+
+@app.route('/delete_user', methods=['POST'])
+def delete_user():
+    e = request.form.get('email').lower()
+    if os.path.exists("user_ids.txt"):
+        with open("user_ids.txt", "r") as f: lines = f.readlines()
+        with open("user_ids.txt", "w") as f:
+            for l in lines:
+                if l.strip().lower() != e: f.write(l)
+    users_col.delete_one({"email": e})
+    return redirect('/')
+
+# --- BOT HANDLERS ---
 @bot.message_handler(commands=['start'])
 def welcome(m):
     bot.send_message(m.chat.id, "👋 Hello! Please enter your registered email:")
@@ -167,19 +217,19 @@ def login(m):
     if is_authorized(e):
         state["email"] = e; state["chat_id"] = m.chat.id
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰')
-        bot.send_message(m.chat.id, "✅ Authorized!", reply_markup=markup)
-    else: bot.send_message(m.chat.id, "🚫 Access Denied. Contact Admin.")
+        bot.send_message(m.chat.id, "✅ Access Granted!", reply_markup=markup)
+    else: bot.send_message(m.chat.id, "🚫 Access Denied. Email not registered.")
 
 @bot.message_handler(func=lambda m: m.text in ['Demo 🛠️', 'Live 💰'])
 def select_mode(m):
     state["is_live"] = True if "Live" in m.text else False
-    bot.send_message(m.chat.id, "Please enter your API Token:")
+    bot.send_message(m.chat.id, "Enter API Token:")
     bot.register_next_step_handler(m, save_token)
 
 def save_token(m):
     state["api_token"] = m.text.strip()
     state["currency"] = "tUSDT" if state["is_live"] else "USD"
-    bot.send_message(m.chat.id, f"✅ Mode: {'Live' if state['is_live'] else 'Demo'}\nCurrency: {state['currency']}\n\nEnter Initial Stake:")
+    bot.send_message(m.chat.id, f"✅ Initialized in {'LIVE' if state['is_live'] else 'DEMO'} mode ({state['currency']}).\nEnter Stake Amount:")
     bot.register_next_step_handler(m, save_stake)
 
 def save_stake(m):
@@ -187,31 +237,19 @@ def save_stake(m):
         v = float(m.text); state["initial_stake"] = v; state["current_stake"] = v
         bot.send_message(m.chat.id, "Enter Target Profit:")
         bot.register_next_step_handler(m, save_tp)
-    except: bot.send_message(m.chat.id, "Invalid number. Start again.")
+    except: bot.send_message(m.chat.id, "Invalid number.")
 
 def save_tp(m):
     try:
         state["tp"] = float(m.text); state["is_running"] = True
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑')
-        bot.send_message(m.chat.id, "🚀 Bot is now running strategy...", reply_markup=markup)
-    except: bot.send_message(m.chat.id, "Invalid number. Start again.")
+        bot.send_message(m.chat.id, "🚀 Strategy Started!", reply_markup=markup)
+    except: bot.send_message(m.chat.id, "Invalid number.")
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
 @bot.message_handler(commands=['stop'])
 def stop_all(m):
-    reset_and_stop(state, "Stopped by user.")
-
-# --- ADMIN PANEL ---
-@app.route('/')
-def home():
-    return "Bot Admin System is Running."
-
-@app.route('/add_user', methods=['POST'])
-def add_user():
-    e = request.form.get('email').strip().lower()
-    if e:
-        with open("user_ids.txt", "a") as f: f.write(e + "\n")
-    return redirect('/')
+    reset_and_stop(state, "Manual Stop.")
 
 if __name__ == '__main__':
     multiprocessing.Process(target=main_loop, args=(state,), daemon=True).start()
