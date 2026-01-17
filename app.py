@@ -7,8 +7,8 @@ from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# --- CONFIGURATION ---
-TOKEN = "8433565422:AAFSk6WKbN9UgZx3-a6brmcM3jlBpsL2HvM"
+# --- CONFIGURATION (UPDATED TOKEN) ---
+TOKEN = "8433565422:AAGytyiETHhKUfTkpOEPkkDtCJBpzyIB0Yw"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -24,12 +24,12 @@ def get_initial_state():
         "currency": "USD", "is_running": False, "chat_id": None,
         "total_profit": 0.0, "win_count": 0, "loss_count": 0, "is_trading": False,
         "consecutive_losses": 0, "active_contract": None, "start_time": 0,
-        "last_processed_tick": 0.0, "is_live": False
+        "last_processed_tick": 0.0
     }
 
 state = manager.dict(get_initial_state())
 
-# --- AUTHORIZATION ---
+# --- AUTHORIZATION SYSTEM ---
 def is_authorized(email):
     email = email.strip().lower()
     if not os.path.exists("user_ids.txt"): return False
@@ -57,7 +57,7 @@ def reset_and_stop(state_proxy, text):
     initial = get_initial_state()
     for k, v in initial.items(): state_proxy[k] = v
 
-# --- RESULT CHECK (18s) ---
+# --- RESULT CHECK (18s DELAY) ---
 def check_result(state_proxy):
     if not state_proxy["active_contract"] or time.time() - state_proxy["start_time"] < 18:
         return
@@ -100,7 +100,7 @@ def check_result(state_proxy):
                 reset_and_stop(state_proxy, "Target Profit Reached!")
     except: pass
 
-# --- MAIN LOOP ---
+# --- STRATEGY ENGINE ---
 def main_loop(state_proxy):
     ws_persistent = None
     while True:
@@ -155,7 +155,7 @@ def main_loop(state_proxy):
             if ws_persistent: ws_persistent.close()
             ws_persistent = None; time.sleep(1)
 
-# --- ADMIN PANEL (HTML) ---
+# --- ADMIN PANEL HTML ---
 @app.route('/')
 def home():
     emails = []
@@ -170,13 +170,12 @@ def home():
         table{width:100%;border-collapse:collapse;margin-top:20px;}th,td{padding:12px;border:1px solid #ddd;}
         th{background:#333;color:white;}.btn{padding:8px 15px;border:none;border-radius:5px;color:white;cursor:pointer;}
         .btn-add{background:#28a745;}.btn-del{background:#dc3545;}
-        input, select{padding:8px;margin:5px;}
     </style></head><body><div class="card"><h2>User Management Panel</h2>
     <form method="POST" action="/add_user"><input type="email" name="email" placeholder="Email" required><button type="submit" class="btn btn-add">Add User</button></form>
     <table><tr><th>Email</th><th>Set Expiry</th><th>Actions</th></tr>
     {% for e in emails %}<tr><td>{{e}}</td><td><form method="POST" action="/update_expiry">
-    <input type="hidden" name="email" value="{{e}}"><select name="duration"><option value="1">1 Day</option><option value="30">30 Days</option><option value="36500">Lifetime</option></select>
-    <button type="submit" class="btn btn-add">Update</button></form></td><td><form method="POST" action="/delete_user"><input type="hidden" name="email" value="{{e}}">
+    <input type="hidden" name="email" value="{{e}}"><select name="duration"><option value="1">1 Day</option><option value="30">30 Days</option><option value="36500">Life</option></select>
+    <button type="submit" class="btn btn-add">Set</button></form></td><td><form method="POST" action="/delete_user"><input type="hidden" name="email" value="{{e}}">
     <button type="submit" class="btn btn-del">Delete</button></form></td></tr>{% endfor %}
     </table></div></body></html>"""
     return render_template_string(html, emails=emails)
@@ -217,20 +216,30 @@ def login(m):
     if is_authorized(e):
         state["email"] = e; state["chat_id"] = m.chat.id
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('Demo 🛠️', 'Live 💰')
-        bot.send_message(m.chat.id, "✅ Access Granted!", reply_markup=markup)
-    else: bot.send_message(m.chat.id, "🚫 Access Denied. Email not registered.")
+        bot.send_message(m.chat.id, "✅ Authorized!", reply_markup=markup)
+    else: bot.send_message(m.chat.id, "🚫 No Access.")
 
 @bot.message_handler(func=lambda m: m.text in ['Demo 🛠️', 'Live 💰'])
-def select_mode(m):
-    state["is_live"] = True if "Live" in m.text else False
+def ask_token(m):
     bot.send_message(m.chat.id, "Enter API Token:")
     bot.register_next_step_handler(m, save_token)
 
 def save_token(m):
-    state["api_token"] = m.text.strip()
-    state["currency"] = "tUSDT" if state["is_live"] else "USD"
-    bot.send_message(m.chat.id, f"✅ Initialized in {'LIVE' if state['is_live'] else 'DEMO'} mode ({state['currency']}).\nEnter Stake Amount:")
-    bot.register_next_step_handler(m, save_stake)
+    token = m.text.strip()
+    try:
+        ws = websocket.create_connection("wss://blue.derivws.com/websockets/v3?app_id=16929")
+        ws.send(json.dumps({"authorize": token}))
+        res = json.loads(ws.recv())
+        if "authorize" in res:
+            # Displays the detected account currency immediately
+            state["currency"] = res["authorize"]["currency"]
+            state["api_token"] = token
+            bot.send_message(m.chat.id, f"✅ Verified!\n💰 Account Currency: **{state['currency']}**\n\nEnter Initial Stake:")
+            bot.register_next_step_handler(m, save_stake)
+        else:
+            bot.send_message(m.chat.id, "❌ Invalid Token.")
+        ws.close()
+    except: bot.send_message(m.chat.id, "❌ Connection Error.")
 
 def save_stake(m):
     try:
@@ -243,13 +252,13 @@ def save_tp(m):
     try:
         state["tp"] = float(m.text); state["is_running"] = True
         markup = types.ReplyKeyboardMarkup(resize_keyboard=True).add('STOP 🛑')
-        bot.send_message(m.chat.id, "🚀 Strategy Started!", reply_markup=markup)
+        bot.send_message(m.chat.id, f"🚀 Bot Started!\nOperating Currency: **{state['currency']}**", reply_markup=markup)
     except: bot.send_message(m.chat.id, "Invalid number.")
 
 @bot.message_handler(func=lambda m: m.text == 'STOP 🛑')
 @bot.message_handler(commands=['stop'])
 def stop_all(m):
-    reset_and_stop(state, "Manual Stop.")
+    reset_and_stop(state, "Stopped by user.")
 
 if __name__ == '__main__':
     multiprocessing.Process(target=main_loop, args=(state,), daemon=True).start()
