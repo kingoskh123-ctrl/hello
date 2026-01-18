@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # --- CONFIGURATION (UPDATED TOKEN) ---
-TOKEN = "8433565422:AAGj7R9QvwZAZMlgbVIY6WzikTgQMmRin4U"
+TOKEN = "8433565422:AAEeCg0KoTzbWUUEynX_Rj0uTbPblYT-408"
 MONGO_URI = "mongodb+srv://charbelnk111_db_user:Mano123mano@cluster0.2gzqkc8.mongodb.net/?appName=Cluster0"
 
 bot = telebot.TeleBot(TOKEN)
@@ -103,7 +103,6 @@ def main_loop(state_proxy):
     while True:
         try:
             now = datetime.now()
-            # Trigger precisely at 00 or 30
             if state_proxy["is_running"] and not state_proxy["is_trading"] and (now.second == 0 or now.second == 30):
                 if state_proxy["last_second"] != now.second or state_proxy["last_minute"] != now.minute:
                     state_proxy["last_second"] = now.second
@@ -124,7 +123,6 @@ def main_loop(state_proxy):
                         c3 = ticks[44] - ticks[30]
                         
                         sig = None
-                        # Pattern 0.4: Up-Down-Up or Down-Up-Down
                         if c1 >= 0.4 and c2 <= -0.4 and c3 >= 0.4:
                             sig = "CALL"
                         elif c1 <= -0.4 and c2 >= 0.4 and c3 <= -0.4:
